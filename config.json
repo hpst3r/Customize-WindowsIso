@@ -1,0 +1,81 @@
+{
+  "boot": {
+    "BypassTPM": true,
+    "BypassSecureBoot": true
+  },
+  "install": {
+    "Registry": {
+      "DisableSponsoredApps": true,
+      "DisableCEIP": true,
+      "DisableTelemetry": true,
+      "DisableMouseAcceleration": true,
+      "DisableCloudContent": true,
+      "DisableStartSuggestions": true,
+      "DisableConsumerAccounts": true,
+      "DisableNewsAndInterests": true,
+      "DisableGameDVR": true,
+      "DisableGameBar": true,
+      "DisableDevHome": true
+    },
+    "Packages": {
+      "AppXPackagesToRemove": [
+        "Clipchamp.Clipchamp*",
+        "Microsoft.3DBuilder*",
+        "Microsoft.BingNews*",
+        "Microsoft.BingWeather*",
+        "Microsoft.BingSearch*",
+        "Microsoft.Copilot*",
+        "Microsoft.Windows.DevHome*",
+        "Microsoft.MicrosoftOfficeHub*",
+        "MicrosoftCorporationII.MicrosoftFamily*",
+        "Microsoft.XboxGameCallableUI",
+        "Microsoft.XboxIdentityProvider",
+        "Microsoft.Xbox.TCUI",
+        "Microsoft.GamingApp*",
+        "Microsoft.Xbox*",
+        "Microsoft.MicrosoftSolitaireCollection*",
+        "Microsoft.MSPaint*",
+        "Microsoft.GetHelp*",
+        "Microsoft.Getstarted*",
+        "Microsoft.WindowsFeedbackHub*",
+        "Microsoft.Zune*",
+        "Microsoft.BingWeather*",
+        "Microsoft.Microsoft3DViewer*",
+        "Microsoft.MicrosoftOfficeHub*",
+        "Microsoft.MicrosoftStickyNotes*",
+        "Microsoft.OneConnect*",
+        "Microsoft.People*",
+        "Microsoft.SkypeApp*",
+        "MicrosoftCorporationII.QuickAssist*",
+        "Microsoft.Wallet*",
+        "Microsoft.WindowsAlarms*",
+        "Microsoft.WindowsCamera*",
+        "Microsoft.windowscommunicationsapps*",
+        "Microsoft.WindowsMaps*",
+        "Microsoft.WindowsPhone*",
+        "Microsoft.WindowsSoundRecorder*",
+        "Microsoft.PowerAutomateDesktop*",
+        "Microsoft.Wallet*",
+        "MicrosoftWindows.Client.WebExperience*"
+      ],
+      "WindowsFeaturesToRemove": [
+        "App.StepsRecorder*",
+        "Microsoft.Windows.WordPad*",
+        "MathRecognizer*",
+        "Media.WindowsMediaPlayer*",
+        "Microsoft.Windows.PowerShell.ISE*"
+      ],
+      "WindowsPackagesToRemove": [
+        "Microsoft-Windows-LanguageFeatures-Handwriting-$langCode-Package*",
+        "Microsoft-Windows-LanguageFeatures-OCR-$langCode-Package*",
+        "Microsoft-Windows-LanguageFeatures-Speech-$langCode-Package*",
+        "Microsoft-Windows-LanguageFeatures-TextToSpeech-$langCode-Package*",
+        "Microsoft-Windows-Wallpaper-Content-Extended-FoD-Package*",
+        "Microsoft-Windows-WordPad-FoD-Package*",
+        "Microsoft-Windows-MediaPlayer-Package*",
+        "Microsoft-Windows-TabletPCMath-Package*",
+        "Microsoft-Windows-StepsRecorder-Package*"
+      ]
+    }
+  }
+}

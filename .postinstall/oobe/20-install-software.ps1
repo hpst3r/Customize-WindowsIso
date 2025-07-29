@@ -1,0 +1,2 @@
+& winget install google.chrome --accept-source-agreements --accept-package-agreements --disable-interactivity
+& winget install microsoft.visualstudiocode --accept-source-agreements --accept-package-agreements --disable-interactivity
