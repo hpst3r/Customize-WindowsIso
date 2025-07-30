@@ -9,6 +9,14 @@ param (
   [string] $OutPath = (Join-Path $WorkingDir 'Customized.iso')
 )
 
+Start-Transcript -Path "Get-Iso-$($Version)-$(Get-Date -UFormat %s).log"
+
+Write-Host "Customize-Iso: Beginning execution: version $(git rev-parse --short HEAD) at $(Get-Date -UFormat %s)."
+
+$Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+Write-Host "Output: $OutPath"
+
 $Config = (Get-Content $ConfigFile | ConvertFrom-Json)
 
 # working directories
@@ -30,7 +38,20 @@ function Get-IsoImage {
 
   # copy the contents of the ISO to the scratch directory
   New-Item -Path $ScratchPath -ItemType Directory -Force | Out-Null
-  robocopy "$($Drive):\" $ScratchPath /E /COPYALL /R:0 /W:0 | Out-Null
+  
+  Start-Process `
+    -File robocopy.exe `
+    -ArgumentList @(
+      "$($Drive):\",
+      $ScratchPath,
+      '/E',
+      '/COPYALL',
+      '/R:0',
+      '/W:0'
+    ) `
+    -Wait `
+    -NoNewWindow |
+    Out-Null
 
   # unmount the ISO
   Dismount-DiskImage -ImagePath $IsoPath
@@ -251,7 +272,7 @@ function Set-Image {
   # mount the boot.wim
   $SetupIndex = (Get-WindowsImage -ImagePath $BootWim.FullName | Where-Object ImageName -eq 'Microsoft Windows Setup (x64)').ImageIndex
 
-  Mount-WindowsImage -ImagePath $BootWim -Path $MountPath -Optimize -Index $SetupIndex
+  Mount-WindowsImage -ImagePath $BootWim.FullName -Path $MountPath -Optimize -Index $SetupIndex
 
   Write-Host "Set-Image: Modifying the offline registry in $($BootWim.Name) to bypass hardware restrictions."
 
@@ -275,13 +296,65 @@ function Set-Image {
 # create an ISO from the modified image (as files on disk)
 function New-IsoImage {
   param (
+    [Parameter(Mandatory=$true)]
     [string] $Source,
+    [Parameter(Mandatory=$true)]
     [string] $Outputfile,
-    [string] $EFIFile = "$Source\efi\microsoft\boot\efisys_noprompt.bin",
-    [string] $BIOSFile = "$Source\boot\etfsboot.com"
+    [string] $EFIFile,
+    [string] $BIOSFile
   )
 
-  Start-Process 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe' -ArgumentList "-m -o -h -u2 -udfver102 -bootdata:2#p0,e,b$BIOSFile#pEF,e,b$EFIFile $Source $Outputfile" -Wait -NoNewWindow
+  function Get-ShortPath {
+    param ([string]$Path)
+    $fso = New-Object -ComObject Scripting.FileSystemObject
+
+    $FileCreated = $false
+    if (-not (Test-Path $Path)) {
+      New-Item $Path 1>$null
+      $FileCreated = $true
+    }
+
+    if (Test-Path $Path -PathType Container) {
+        return $fso.GetFolder($Path).ShortPath
+    } else {
+        return $fso.GetFile($Path).ShortPath
+    }
+
+    if ($FileCreated) {
+      Remove-Item $Path 1>$null
+    }
+
+  }
+
+  if (-not [bool]$EFIFile) { $EFIFile = Get-ShortPath (Join-Path $Source "efi\microsoft\boot\efisys_noprompt.bin") }
+
+  if (-not [bool]$BIOSFile) { $BIOSFile = Get-ShortPath (Join-Path $Source "boot\etfsboot.com") }
+
+  $Source = Get-ShortPath $Source
+  $Outputfile = Get-ShortPath $Outputfile
+
+  $BootData = "-bootdata:2#p0,e,b`"${BIOSFile}`"#pEF,e,b`"${EFIFile}`""
+
+  Write-Host "New-IsoImage: oscdimg.exe BootData: $($BootData -join " ")"
+
+  $Arguments = @(
+    "-m",
+    "-o",
+    "-h",
+    "-u2",
+    "-udfver102",
+    $BootData,
+    $Source,
+    $Outputfile
+  )
+
+  Write-Host "New-IsoImage: oscdimg.exe arguments: $($Arguments -join " ")"
+
+  Start-Process `
+    -FilePath 'C:\Program Files (x86)\Windows Kits\10\Assessment and Deployment Kit\Deployment Tools\amd64\Oscdimg\oscdimg.exe' `
+    -ArgumentList $Arguments `
+    -Wait `
+    -NoNewWindow
 
 }
 
@@ -325,3 +398,9 @@ Write-Host "Creating output file"
 New-IsoImage -Source $ScratchPath -Outputfile $OutPath
 
 Write-Host "Done"
+
+$Stopwatch.Stop()
+
+Write-Host "Customize-Iso: Execution completed at: $(Get-Date -UFormat %s), elapsed: $($Stopwatch.Elapsed.TotalSeconds) seconds."
+
+Stop-Transcript

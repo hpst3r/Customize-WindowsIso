@@ -1,0 +1,6 @@
+{
+  "WorkingDirectory": "C:\\IsoCustomize",
+  "InputDirectory": "C:\\Shares\\Standard ISOs",
+  "OutputDirectory": "C:\\Shares\\Customized ISOs",
+  "RecoveryWimPath": "C:\\Winre.wim"
+}
