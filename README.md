@@ -60,6 +60,31 @@ install. With a single edition, Setup installs it without asking.
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
 
+## Post-install scripts
+
+The stubs look for `.postinstall\specialize` and `.postinstall\oobe` at the root of any
+drive (e.g. a USB stick) and run the `.ps1` scripts in them, sorted by name.
+
+The `specialize` stub runs as SYSTEM with no console, so it only runs the top-level scripts.
+
+The `oobe` stub runs at first logon. Subfolders of `.postinstall\oobe` are clients (and may
+have subfolders of their own, e.g. sites). The stub shows them as a tree, and picking a folder
+runs the scripts in every folder on the way down to it:
+
+```text
+.postinstall\oobe\
+  01-common.ps1          always runs
+  ClientA\
+    01-join-domain.ps1   runs for ClientA and anything under it
+    Site1\
+      01-printers.ps1    runs for ClientA\Site1 only
+  ClientB\
+```
+
+Keys: arrows to move and expand/collapse, a letter to jump, Enter to select (it lists the
+scripts and asks again before running), Esc to run nothing. With no subfolders, the
+top-level scripts run without a menu, as before.
+
 ## Weekly runs
 
 `runner.ps1` customizes every ISO in `InputDirectory` (see `runner-config.json`) one at a
