@@ -130,8 +130,13 @@ function Invoke-Dism([string[]] $Arguments, [switch] $AllowFailure) {
   Invoke-Native $script:Dism ($Arguments + $Common) -SuccessExitCodes @(0, 3010) -AllowFailure:$AllowFailure
 }
 
-function Mount-Wim([string] $ImageFile, [int] $Index) {
-  Invoke-Dism @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir", '/Optimize') | Out-Null
+# /Optimize mounts faster but leaves files unhydrated; newer servicing stacks
+# (seen on 29xxx) then fail capability removal with 4350 (ERROR_FILE_OFFLINE).
+# Only use it for images that just get registry edits.
+function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize) {
+  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir")
+  if ($Optimize) { $Arguments += '/Optimize' }
+  Invoke-Dism $Arguments | Out-Null
 }
 
 function Dismount-Wim([switch] $Commit) {
@@ -431,7 +436,7 @@ function Set-BootImage([string] $BootWim, $BootConfig) {
   $Index = Get-SetupBootIndex $BootWim
   Write-Host "Set-BootImage: mounting boot.wim index $Index to set LabConfig ($($Values.Name -join ', '))."
 
-  Mount-Wim -ImageFile $BootWim -Index $Index
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
   $Saved = $false
   try {
     $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
