@@ -12,6 +12,7 @@
     "NoPrompt": true
   },
   "install": {
+    "Format": "wim",
     "ExportWim": true,
     "Packages": {
       "AppXPackagesToRemove": [
