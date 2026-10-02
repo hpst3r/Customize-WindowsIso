@@ -1,6 +1,8 @@
 {
-  "WorkingDirectory": "C:\\IsoCustomize",
-  "InputDirectory": "C:\\Shares\\Standard ISOs",
-  "OutputDirectory": "C:\\Shares\\Customized ISOs",
-  "RecoveryWimPath": "C:\\Winre.wim"
+  "WorkingDirectory": "Y:\\IsoBuild\\Customize",
+  "InputDirectory": "Y:\\Images\\Standard",
+  "OutputDirectory": "Y:\\Images\\Customized",
+  "LogDirectory": "Y:\\IsoBuild\\Logs",
+  "RecoveryWimPath": "",
+  "LogRetentionDays": 90
 }

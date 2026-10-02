@@ -1,38 +1,60 @@
-# register scheduled task to build ISOs (start runner.ps1)
-# or, alternatively, just run build job when 4663 event logged on an .iso file in target dir (D:\Images)?
+#Requires -Version 5.1 -RunAsAdministrator
 
-$Username = "ImageWorker"
-$Password = "UseAStrongPasswordHere123!"
-$UserDesc = "Local account for scheduled DISM task"
+<#
+.SYNOPSIS
+Registers the weekly image build: Get-WindowsIso (download + update) then
+Customize-WindowsIso (customize), as one scheduled task running as SYSTEM.
 
-# create user
-if (-not (Get-LocalUser -Name $Username -ErrorAction SilentlyContinue)) {
-    New-LocalUser `
-        -Name $Username `
-        -Password ($Password | ConvertTo-SecureString -AsPlainText -Force) `
-        -FullName "Image Task User" `
-        -Description $UserDesc `
-        -PasswordNeverExpires:$true
-    Write-Host "Created user '$Username'"
-} else {
-    Write-Host "User '$Username' already exists"
-}
-Add-LocalGroupMember -Group "Administrators" -Member $Username -ErrorAction SilentlyContinue
+.DESCRIPTION
+Task Scheduler runs a task's actions in order, each waiting for the previous
+one, so customization always sees the finished output of the download step.
+The customize step runs even if some downloads failed - it rebuilds whatever
+changed and skips the rest.
 
-# grant SeBatchLogonRight (log on as batch job)
-# remove SeInteractiveLogonRight
-# use mmc, scripting this is a pain
+Running as SYSTEM avoids a dedicated local account with a stored password.
 
-$Args = @(
-    '/Create',
-    '/TN', 'WeeklyImageCustomization',
-    '/RU', $Username,
-    '/RP', $Password,
-    '/SC', 'WEEKLY',
-    '/D', 'WED',
-    '/ST', '08:00',
-    '/RL', 'HIGHEST',
-    '/TR', '"powershell.exe -ExecutionPolicy Bypass -File D:\Customize-WindowsIso\runner.ps1"'
+.EXAMPLE
+.\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso
+#>
+param (
+  # path to a clone of https://github.com/hpst3r/Get-WindowsIso; omit to only run customization
+  [string] $GetWindowsIsoPath,
+  [string] $TaskName = 'Weekly Windows Image Build',
+  [System.DayOfWeek] $DayOfWeek = 'Wednesday',
+  [string] $At = '01:00',
+  [int] $TimeLimitHours = 20
 )
 
-Start-Process -FilePath 'schtasks.exe' -ArgumentList $Args -Wait -NoNewWindow
+$ErrorActionPreference = 'Stop'
+
+$PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$Actions = @()
+
+if ($GetWindowsIsoPath) {
+  $Stub = Join-Path (Resolve-Path $GetWindowsIsoPath) 'stub.ps1'
+  if (-not (Test-Path $Stub)) { throw "stub.ps1 not found in $GetWindowsIsoPath" }
+  $Actions += New-ScheduledTaskAction -Execute $PowerShell `
+    -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Stub`"" `
+    -WorkingDirectory (Split-Path $Stub)
+}
+
+$Runner = Join-Path $PSScriptRoot 'runner.ps1'
+$Actions += New-ScheduledTaskAction -Execute $PowerShell `
+  -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Runner`"" `
+  -WorkingDirectory $PSScriptRoot
+
+$Trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DayOfWeek -At $At
+
+$Settings = New-ScheduledTaskSettingsSet `
+  -ExecutionTimeLimit (New-TimeSpan -Hours $TimeLimitHours) `
+  -MultipleInstances IgnoreNew `
+  -StartWhenAvailable `
+  -AllowStartIfOnBatteries `
+  -DontStopIfGoingOnBatteries `
+  -DontStopOnIdleEnd
+
+$Principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+
+Register-ScheduledTask -TaskName $TaskName -Action $Actions -Trigger $Trigger -Settings $Settings -Principal $Principal `
+  -Description 'Downloads fully-updated Windows client/server ISOs (Get-WindowsIso) and customizes them (Customize-WindowsIso).' `
+  -Force

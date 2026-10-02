@@ -1,81 +1,125 @@
 {
   "boot": {
-    "BypassTPM": true,
-    "BypassSecureBoot": true
+    "LabConfig": {
+      "BypassTPMCheck": true,
+      "BypassSecureBootCheck": true,
+      "BypassRAMCheck": true,
+      "BypassCPUCheck": false,
+      "BypassStorageCheck": false
+    }
+  },
+  "iso": {
+    "NoPrompt": true
   },
   "install": {
-    "Registry": {
-      "DisableSponsoredApps": true,
-      "DisableCEIP": true,
-      "DisableTelemetry": true,
-      "DisableMouseAcceleration": true,
-      "DisableCloudContent": true,
-      "DisableStartSuggestions": true,
-      "DisableConsumerAccounts": true,
-      "DisableNewsAndInterests": true,
-      "DisableGameDVR": true,
-      "DisableGameBar": true,
-      "DisableDevHome": true
-    },
+    "ExportWim": true,
     "Packages": {
       "AppXPackagesToRemove": [
-        "Clipchamp.Clipchamp*",
-        "Microsoft.3DBuilder*",
-        "Microsoft.BingNews*",
-        "Microsoft.BingWeather*",
-        "Microsoft.BingSearch*",
-        "Microsoft.Copilot*",
-        "Microsoft.Windows.DevHome*",
-        "Microsoft.MicrosoftOfficeHub*",
-        "MicrosoftCorporationII.MicrosoftFamily*",
-        "Microsoft.XboxGameCallableUI",
-        "Microsoft.XboxIdentityProvider",
-        "Microsoft.Xbox.TCUI",
-        "Microsoft.GamingApp*",
-        "Microsoft.Xbox*",
-        "Microsoft.MicrosoftSolitaireCollection*",
-        "Microsoft.MSPaint*",
-        "Microsoft.GetHelp*",
-        "Microsoft.Getstarted*",
-        "Microsoft.WindowsFeedbackHub*",
-        "Microsoft.Zune*",
-        "Microsoft.BingWeather*",
-        "Microsoft.Microsoft3DViewer*",
-        "Microsoft.MicrosoftOfficeHub*",
-        "Microsoft.MicrosoftStickyNotes*",
-        "Microsoft.OneConnect*",
-        "Microsoft.People*",
-        "Microsoft.SkypeApp*",
-        "MicrosoftCorporationII.QuickAssist*",
-        "Microsoft.Wallet*",
-        "Microsoft.WindowsAlarms*",
-        "Microsoft.WindowsCamera*",
-        "Microsoft.windowscommunicationsapps*",
-        "Microsoft.WindowsMaps*",
-        "Microsoft.WindowsPhone*",
-        "Microsoft.WindowsSoundRecorder*",
-        "Microsoft.PowerAutomateDesktop*",
-        "Microsoft.Wallet*",
-        "MicrosoftWindows.Client.WebExperience*"
+        "Clipchamp.Clipchamp",
+        "Microsoft.BingNews",
+        "Microsoft.BingSearch",
+        "Microsoft.BingWeather",
+        "Microsoft.Copilot",
+        "Microsoft.GamingApp",
+        "Microsoft.Getstarted",
+        "Microsoft.MicrosoftOfficeHub",
+        "Microsoft.MicrosoftSolitaireCollection",
+        "Microsoft.Windows.DevHome",
+        "MicrosoftCorporationII.MicrosoftFamily",
+
+        "Microsoft.3DBuilder",
+        "Microsoft.Microsoft3DViewer",
+        "Microsoft.MSPaint",
+        "Microsoft.OneConnect",
+        "Microsoft.People",
+        "Microsoft.SkypeApp",
+        "Microsoft.Wallet",
+        "Microsoft.WindowsMaps",
+        "microsoft.windowscommunicationsapps"
       ],
-      "WindowsFeaturesToRemove": [
+      "WindowsCapabilitiesToRemove": [
         "App.StepsRecorder*",
-        "Microsoft.Windows.WordPad*",
         "MathRecognizer*",
-        "Media.WindowsMediaPlayer*",
-        "Microsoft.Windows.PowerShell.ISE*"
+        "Microsoft.Windows.WordPad*"
       ],
-      "WindowsPackagesToRemove": [
-        "Microsoft-Windows-LanguageFeatures-Handwriting-$langCode-Package*",
-        "Microsoft-Windows-LanguageFeatures-OCR-$langCode-Package*",
-        "Microsoft-Windows-LanguageFeatures-Speech-$langCode-Package*",
-        "Microsoft-Windows-LanguageFeatures-TextToSpeech-$langCode-Package*",
-        "Microsoft-Windows-Wallpaper-Content-Extended-FoD-Package*",
-        "Microsoft-Windows-WordPad-FoD-Package*",
-        "Microsoft-Windows-MediaPlayer-Package*",
-        "Microsoft-Windows-TabletPCMath-Package*",
-        "Microsoft-Windows-StepsRecorder-Package*"
-      ]
-    }
+      "WindowsPackagesToRemove": []
+    },
+    "Registry": [
+      {
+        "Name": "ConsumerFeatures",
+        "Description": "Stop Windows installing promoted/sponsored apps and consumer account content. The policies are only honored on Enterprise/Education/Server.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Windows\\CloudContent", "Name": "DisableWindowsConsumerFeatures", "Type": "REG_DWORD", "Data": 1 },
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Windows\\CloudContent", "Name": "DisableCloudOptimizedContent", "Type": "REG_DWORD", "Data": 1 },
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Windows\\CloudContent", "Name": "DisableConsumerAccountStateContent", "Type": "REG_DWORD", "Data": 1 }
+        ]
+      },
+      {
+        "Name": "ContentDeliveryManager",
+        "Description": "New users: no silently installed apps, Start/Settings suggestions, tips, or lock screen ads.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "ContentDeliveryAllowed", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "FeatureManagementEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "OemPreInstalledAppsEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "PreInstalledAppsEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "PreInstalledAppsEverEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "RotatingLockScreenEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "RotatingLockScreenOverlayEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SilentInstalledAppsEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SoftLandingEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContentEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-310093Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-314559Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-338388Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-338389Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-338393Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-353694Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-353696Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SubscribedContent-353698Enabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager", "Name": "SystemPaneSuggestionsEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\\Subscriptions", "Delete": true },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\ContentDeliveryManager\\SuggestedApps", "Delete": true }
+        ]
+      },
+      {
+        "Name": "StartRecommendations",
+        "Description": "Hide promoted items in Start's Recommended section. HideRecommendedSection is only honored on Enterprise/Education/SE.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced", "Name": "Start_IrisRecommendations", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Windows\\Explorer", "Name": "HideRecommendedSection", "Type": "REG_DWORD", "Data": 1 }
+        ]
+      },
+      {
+        "Name": "SearchWebContent",
+        "Description": "No Bing results or search highlights in Windows Search.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\Search", "Name": "BingSearchEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "DEFAULTUSER", "Key": "Software\\Microsoft\\Windows\\CurrentVersion\\SearchSettings", "Name": "IsDynamicSearchBoxEnabled", "Type": "REG_DWORD", "Data": 0 },
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Windows\\Windows Search", "Name": "EnableDynamicContentInWSB", "Type": "REG_DWORD", "Data": 0 }
+        ]
+      },
+      {
+        "Name": "Widgets",
+        "Description": "Turn off Widgets / News and Interests by policy instead of removing the Web Experience Pack.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "SOFTWARE", "Key": "Policies\\Microsoft\\Dsh", "Name": "AllowNewsAndInterests", "Type": "REG_DWORD", "Data": 0 }
+        ]
+      },
+      {
+        "Name": "MouseAcceleration",
+        "Description": "New users: turn off 'Enhance pointer precision'.",
+        "Enabled": true,
+        "Values": [
+          { "Hive": "DEFAULTUSER", "Key": "Control Panel\\Mouse", "Name": "MouseSpeed", "Type": "REG_SZ", "Data": "0" },
+          { "Hive": "DEFAULTUSER", "Key": "Control Panel\\Mouse", "Name": "MouseThreshold1", "Type": "REG_SZ", "Data": "0" },
+          { "Hive": "DEFAULTUSER", "Key": "Control Panel\\Mouse", "Name": "MouseThreshold2", "Type": "REG_SZ", "Data": "0" }
+        ]
+      }
+    ]
   }
 }
