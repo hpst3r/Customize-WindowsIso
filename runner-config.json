@@ -5,6 +5,9 @@
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
+  "KeepPrevious": true,
+  "BuildIndex": true,
+  "DeleteSourceAfterBuild": false,
   "DriverSets": [
     {
       "Name": "VirtIO",

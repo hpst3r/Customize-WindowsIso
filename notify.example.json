@@ -1,0 +1,21 @@
+{
+  "StubSummaryPath": "Y:\\src\\Get-WindowsIso\\logs\\last-run-stub.json",
+  "MaxSummaryAgeHours": 24,
+  "Link": "",
+  "Ntfy": {
+    "Enabled": true,
+    "Send": "Always",
+    "Server": "https://ntfy.sh",
+    "Topic": "replace-with-a-long-random-topic-name"
+  },
+  "Email": {
+    "Enabled": false,
+    "Send": "OnlyOnFailure",
+    "SmtpServer": "smtp.office365.com",
+    "Port": 587,
+    "Security": "StartTls",
+    "From": "builds@example.com",
+    "To": ["admin@example.com"],
+    "Username": "builds@example.com"
+  }
+}

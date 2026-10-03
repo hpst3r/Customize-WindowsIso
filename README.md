@@ -40,6 +40,15 @@ Outputs, written only after the ISO has been built and verified:
 - `<name>.iso.sha256.txt`
 - `<name>.iso.json`: images, removed packages, warnings, build time, and the fingerprint used by the runner
 
+With `-KeepPrevious` (the runner passes it unless `KeepPrevious` is `false` in
+`runner-config.json`), the ISO being replaced and its sidecars are kept as
+`<name>.previous.iso` (`.previous.iso.json`, `.previous.iso.sha256.txt`), replacing any older
+previous copy, so last week's image is still there if this week's turns out bad. This roughly
+doubles the space the output directory needs. If a client on the share has the old previous
+copy open it can't be replaced: the build still succeeds, with a warning, without keeping the
+ISO it replaced. If a client has the current ISO open it can't be replaced at all: the build
+fails and leaves the current ISO and its sidecars as they were.
+
 If an image has several editions (e.g. the four Windows Server editions), the
 `/IMAGE/INDEX` selection is removed from the unattend so Setup asks which edition to
 install. With a single edition, Setup installs it without asking.
@@ -172,8 +181,38 @@ time. It skips an ISO when the output already exists and was built from the same
 with the same config, unattend, stubs, and script. Pass `-Force` to rebuild everything.
 Exit code is non-zero if any ISO failed, so Task Scheduler's *Last Run Result* shows it.
 
+### Deleting source ISOs (`DeleteSourceAfterBuild`)
+
+To save space, once an ISO's customized output is current (just built, or found up to date)
+the runner deletes the source ISO from `InputDirectory`, keeping its `.iso.json` and
+`.iso.sha256.txt` (`DeleteSourceAfterBuild`, default `true`). It only deletes an ISO whose
+`.sha256.txt` is at least as new as the ISO, and only if the `.iso.json` is there too. That is
+enough for both stages to keep working:
+
+- The runner's fingerprint uses the source's SHA-256 from the `.sha256.txt`, so it can still
+  tell that an output is up to date without the ISO.
+- Get-WindowsIso's `stub.ps1` skips a version when the `.iso.json` already has the latest
+  uupdump build, ISO or not. A new build is downloaded as usual, customized, then deleted.
+
+The first run after turning this on finds every output up to date and deletes the sources.
+
+If an output needs rebuilding but its source is gone, because `config.json`, `autounattend.xml`,
+the stubs, `Customize-Iso.ps1` or the virtio-win ISO changed (or with `-Force`), the runner
+can't rebuild it. It reports the image as **Stale** (result `Stale`, in the summary, the
+notification and the index page) with the command to fix it, and exits non-zero:
+
+```PowerShell
+Y:\src\Get-WindowsIso\stub.ps1 -Force -Version 'Windows Server 2022'   # downloads it again
+.\runner.ps1                                                            # or wait for next week
+```
+
+So with this on, **any change to those inputs means downloading every image again**. Turn it
+off (`"DeleteSourceAfterBuild": false`) while you are changing the configuration. To retire an
+image, delete its `.iso.json` and `.iso.sha256.txt` from `InputDirectory` too; otherwise
+it is reported as stale.
+
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
-`stub.ps1` and then `runner.ps1`:
+`stub.ps1`, then `runner.ps1`, then `Send-BuildNotification.ps1` (see Notifications):
 
 ```PowerShell
 .\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso
@@ -183,3 +222,94 @@ Logs are in `LogDirectory` (default `Y:\IsoBuild\Logs`). Each ISO has its own
 `Customize-<name>-<timestamp>.log`, and DISM's log is in the working directory.
 A failed build leaves its working directory in place for troubleshooting.
 The next run cleans it up, including any stale mounts.
+
+Each run also writes a machine-readable summary to `LogDirectory\last-run-runner.json` (and a
+`runner-<timestamp>.json` copy beside the transcript): start/end time, exit code, log file, and
+per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`), minutes,
+warnings, and the source build, image versions and editions from the manifests.
+Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
+
+## Checking a customized ISO (`Test-CustomizedIso.ps1`)
+
+`Test-CustomizedIso.ps1` mounts a customized ISO read-only and checks it against `config.json`:
+boot files, `autounattend.xml` (no `InstallFrom` when there are several editions), the `$OEM$`
+stubs (against `stub-scripts\`), and for every image in `install.wim`/`install.esd`: WinRE is
+present, none of the configured AppX packages/capabilities/packages is left, every value of the
+enabled `Registry` groups is set (or deleted) in the image's hives, and the drivers the ISO's
+manifest lists are installed. In `boot.wim` it checks the `LabConfig` values and drivers. It
+uses `dism.exe /Mount-Image /ReadOnly` and `reg.exe` and changes nothing.
+
+```PowerShell
+.\Test-CustomizedIso.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -OutputDirectory Y:\IsoBuild\Logs
+```
+
+It writes `Test-<name>-<timestamp>.txt` and `.json` reports (default `logs\`) and exits 0 if
+every check passed, 1 otherwise. `-ConfigFile` checks against another config, `-ExpectDrivers`
+overrides the drivers expected from the manifest, and `-WorkingDir` sets the scratch folder for
+the mount point (an `install.esd` is exported to a WIM there first, which is slow).
+
+Loading the image hives (`reg load`) and querying a mounted image (`dism /Image:`) need an
+elevated session with backup/restore privileges; in a restricted or sandboxed session they
+fail, and the script stops with a message saying so. Running it as SYSTEM always works, e.g.
+through a temporary scheduled task:
+
+```PowerShell
+$Action = New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File Y:\src\Customize-WindowsIso\Test-CustomizedIso.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -OutputDirectory Y:\IsoBuild\Logs'
+Register-ScheduledTask -TaskName 'Test customized ISO' -Action $Action -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest) -Force
+Start-ScheduledTask 'Test customized ISO'   # then read the report; Unregister-ScheduledTask when done
+```
+
+## Index page
+
+At the end of every run (even if some ISOs failed) the runner calls `New-ImageIndex.ps1`, which
+writes `index.html` and `index.json` to the output directory: for each ISO the editions and
+versions, the source build, build date, size, SHA-256, removed packages, drivers added,
+warnings, its status in the last run, the kept previous ISO, and `postinstall.iso`. The page is
+self-contained (no external resources), works on a phone, and links to the ISOs relative to
+itself, so it can be opened straight from the share. Both files are written beside the target
+and swapped in. Set `BuildIndex` to `false` in `runner-config.json` to turn it off, or run it
+by hand:
+
+```PowerShell
+.\New-ImageIndex.ps1 -OutputDirectory Y:\Images\Customized -SourceDirectory Y:\Images\Standard
+```
+
+## Notifications
+
+The task's last action, `Send-BuildNotification.ps1`, reads both run summaries and sends one
+message, e.g. *Windows images: OK (2 rebuilt)*, *Windows images: FAILED (1 failed)* or
+*Windows images: ACTION NEEDED (3 stale)*, listing what was rebuilt, new Windows builds,
+failures, durations and warning counts. A summary that is missing or older than
+`MaxSummaryAgeHours` (default 24) counts as a failure, since that stage didn't finish.
+
+Setup (on the build machine, elevated):
+
+1. Copy `notify.example.json` to `notify.json` (it's gitignored) and edit it. Each channel is
+   optional (`Enabled`) and has `Send`: `Always` or `OnlyOnFailure` (anything but OK, so it
+   includes *ACTION NEEDED*).
+   - `Ntfy`: `Server` (default `https://ntfy.sh`) and `Topic`. On the public server anyone who
+     knows the topic can read it, so use a long random name. The message has priority 4 on
+     failure, 3 when something was rebuilt, and 2 when nothing changed.
+   - `Email`: an authenticated SMTP relay (Microsoft 365 `smtp.office365.com`, Amazon SES,
+     etc.): `SmtpServer`, `Port` (587), `Security` (`StartTls`, or `None` for a trusted
+     relay without TLS), `From`, `To` (list), `Username`. `System.Net.Mail` can't do TLS on
+     connect (port 465), so use 587 with STARTTLS. Microsoft 365 needs SMTP AUTH enabled
+     for the sending mailbox.
+   - `Link`: optional URL opened when the ntfy notification is tapped (e.g. the index page).
+2. Store secrets with `Set-NotificationSecret.ps1`; it prompts for the value and never prints it:
+
+   ```PowerShell
+   .\Set-NotificationSecret.ps1 -Name SmtpPassword
+   .\Set-NotificationSecret.ps1 -Name NtfyToken      # only for a protected ntfy topic
+   ```
+
+   They are encrypted with DPAPI in *LocalMachine* scope into `notify.secrets.json`
+   (gitignored, readable only by SYSTEM and Administrators): the SYSTEM task can decrypt
+   them, but a copy of the file is useless on another machine. Re-run it to change a secret,
+   or pass `-Remove`.
+3. Test: `.\Send-BuildNotification.ps1 -Test` sends on every enabled channel (ignoring
+   `OnlyOnFailure`); `-DryRun` only prints the message. Run `register-task.ps1` again to add
+   the notification action to an existing task (`-NoNotification` leaves it out).
+
+A channel that fails is logged as a warning (`notify-<timestamp>.log` in `LogDirectory`); the
+step exits non-zero only if every channel that tried to send failed.

@@ -33,6 +33,8 @@ param (
   [string] $LogDir,
   # opaque string recorded in the output manifest; runner.ps1 uses it to skip unchanged inputs
   [string] $Fingerprint,
+  # move the ISO being replaced (and its sidecars) to <name>.previous.iso instead of deleting it
+  [switch] $KeepPrevious,
   # optional: a JSON file with "DriverSets": [ ... ] (see DriverSets.ps1), e.g.
   # runner-config.json. Each set's drivers go into boot.wim, install.wim and/or WinRE.
   [string] $DriverSetsFile,
@@ -726,6 +728,31 @@ function Test-IsoImage([string] $Path, [int] $ExpectedImageCount) {
   }
 }
 
+# Keep the ISO being replaced as <name>.previous.iso, with $Path's .json/.sha256.txt as
+# <name>.previous.iso.json/.sha256.txt, replacing any older previous copy. $Iso is the old
+# ISO, already renamed out of the way. A client on the share may have the old previous
+# copy open, which blocks deleting it; that only costs keeping this one, so it is a warning.
+function Save-PreviousOutput([string] $Path, [string] $Iso) {
+  $Previous = Join-Path (Split-Path $Path) ([System.IO.Path]::GetFileNameWithoutExtension($Path) + '.previous' + [System.IO.Path]::GetExtension($Path))
+
+  try {
+    if (Test-Path $Previous) { Remove-Item $Previous -Force }
+    Move-Item $Iso $Previous
+  }
+  catch {
+    Add-BuildWarning "could not replace $Previous (open on the share?), so the ISO being replaced was not kept: $_"
+    return
+  }
+  foreach ($Suffix in '.json', '.sha256.txt') {
+    try {
+      if (Test-Path "$Previous$Suffix") { Remove-Item "$Previous$Suffix" -Force }
+      if (Test-Path "$Path$Suffix") { Move-Item "$Path$Suffix" "$Previous$Suffix" }
+    }
+    catch { Add-BuildWarning "could not keep $Path$Suffix as $Previous$($Suffix): $_" }
+  }
+  Write-Host "Save-PreviousOutput: kept the ISO being replaced as $Previous."
+}
+
 #endregion
 
 $ExitCode = 1
@@ -822,18 +849,34 @@ try {
   Write-Host 'Customize-Iso: verifying ISO.'
   $Images = @(Test-IsoImage -Path $StagingIso -ExpectedImageCount $ImageCount)
 
-  # publish: drop the old manifest first so a manifest only ever describes a complete ISO
+  # publish
   $ManifestPath = "$OutPath.json"
   $ChecksumPath = "$OutPath.sha256.txt"
   New-Item -ItemType Directory -Force -Path (Split-Path $OutPath) | Out-Null
-  foreach ($Path in $ManifestPath, $ChecksumPath) { if (Test-Path $Path) { Remove-Item $Path -Force } }
 
   $Checksum = (Get-FileHash -Algorithm SHA256 $StagingIso).Hash.ToLowerInvariant()
 
-  # move beside the destination, then rename over it, so the published ISO is never half-written
+  # move beside the destination, then rename into place, so the published ISO is never half-written
   $Temporary = "$OutPath.partial"
   Move-Item $StagingIso $Temporary -Force
-  Move-Item $Temporary $OutPath -Force
+
+  # Rename the old ISO out of the way first. A client on the share that has it open
+  # blocks this, and then the build fails with the old ISO and its sidecars untouched.
+  $Replaced = "$OutPath.replaced"
+  if (Test-Path $Replaced) { Remove-Item $Replaced -Force }
+  if (Test-Path $OutPath) {
+    try { Move-Item $OutPath $Replaced }
+    catch {
+      Remove-Item $Temporary -Force -ErrorAction SilentlyContinue
+      throw "could not replace $OutPath (open by a client on the share?): $_"
+    }
+    if ($KeepPrevious) { Save-PreviousOutput -Path $OutPath -Iso $Replaced }
+  }
+
+  # drop the old manifest first so a manifest only ever describes a complete ISO
+  foreach ($Path in $ManifestPath, $ChecksumPath) { if (Test-Path $Path) { Remove-Item $Path -Force } }
+  Move-Item $Temporary $OutPath
+  try { if (Test-Path $Replaced) { Remove-Item $Replaced -Force } } catch { Add-BuildWarning "could not delete $($Replaced): $_" }
 
   Set-Content -Encoding ascii -NoNewline -Path $ChecksumPath -Value $Checksum
   [PSCustomObject]@{
