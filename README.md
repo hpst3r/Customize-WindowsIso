@@ -167,6 +167,21 @@ per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`),
 warnings, and the source build, image versions and editions from the manifests.
 Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
 
+## Index page
+
+At the end of every run (even if some ISOs failed) the runner calls `New-ImageIndex.ps1`, which
+writes `index.html` and `index.json` to the output directory: for each ISO the editions and
+versions, the source build, build date, size, SHA-256, removed packages, drivers added,
+warnings, its status in the last run, the kept previous ISO, and `postinstall.iso`. The page is
+self-contained (no external resources), works on a phone, and links to the ISOs relative to
+itself, so it can be opened straight from the share. Both files are written beside the target
+and swapped in. Set `BuildIndex` to `false` in `runner-config.json` to turn it off, or run it
+by hand:
+
+```PowerShell
+.\New-ImageIndex.ps1 -OutputDirectory Y:\Images\Customized -SourceDirectory Y:\Images\Standard
+```
+
 ## Notifications
 
 The task's last action, `Send-BuildNotification.ps1`, reads both run summaries and sends one

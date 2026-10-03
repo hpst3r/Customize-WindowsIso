@@ -156,6 +156,7 @@ $Mutex = New-Object System.Threading.Mutex($false, 'Global\Customize-WindowsIso-
 $Results = [System.Collections.Generic.List[object]]::new()
 $ExitCode = 1
 $RunError = $null
+$Acquired = $false
 
 try {
   # an abandoned mutex (previous runner was killed) is still acquired
@@ -256,6 +257,21 @@ finally {
   $Results | Format-Table -AutoSize | Out-String | Write-Host
 
   try { Write-RunSummary } catch { Write-Warning "runner: could not write the run summary: $_" }
+
+  # index.html/index.json in the output directory, whatever happened to the builds
+  if ($Acquired -and (Get-ConfigValue $Config 'BuildIndex' $true) -and (Test-Path $Config.OutputDirectory)) {
+    try {
+      & (Join-Path $PSScriptRoot 'New-ImageIndex.ps1') -OutputDirectory $Config.OutputDirectory -SourceDirectory $Config.InputDirectory `
+        -RunSummaryPath (Join-Path $LogDir 'last-run-runner.json')
+      if ($LASTEXITCODE -ne 0) { throw "New-ImageIndex.ps1 exited with $LASTEXITCODE" }
+    }
+    catch {
+      Write-Warning "runner: index page: $_"
+      $Results.Add([PSCustomObject]@{ Iso = 'index.html'; Status = 'Failed'; Minutes = 0 })
+      $ExitCode = 1
+      try { Write-RunSummary } catch { Write-Warning "runner: could not write the run summary: $_" }
+    }
+  }
 
   # prune old logs and run summaries (last-run-*.json is kept)
   Get-ChildItem $LogDir -File | Where-Object { $_.Name -like '*.log' -or $_.Name -match '-\d{8}-\d{6}\.json$' } |

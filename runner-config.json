@@ -6,6 +6,7 @@
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
   "KeepPrevious": true,
+  "BuildIndex": true,
   "VirtIO": {
     "IsoPath": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
     "Drivers": ["vioscsi", "viostor", "NetKVM"]
