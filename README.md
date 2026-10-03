@@ -56,7 +56,11 @@ install. With a single edition, Setup installs it without asking.
   - `SOFTWARE`: HKLM\SOFTWARE
   - `SYSTEM`: HKLM\SYSTEM
   - `DEFAULTUSER`: the default user profile (`C:\Users\Default\NTUSER.DAT`), copied to every new user
-- `install.ExportWim`: re-export `install.wim` after servicing to drop orphaned data (smaller ISO)
+- `install.Format`: `wim` (default) or `esd`. With `esd`, the serviced image is exported to
+  `sources\install.esd` with LZMS (`recovery`) compression instead of `install.wim`. It is much
+  smaller (and fits FAT32 USB media more easily) but takes much longer to build. Setup uses
+  `install.esd` automatically. The ESD can't be mounted for servicing; export it to a WIM first.
+- `install.ExportWim`: with `wim`, re-export `install.wim` after servicing to drop orphaned data (smaller ISO)
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
 
@@ -84,6 +88,18 @@ runs the scripts in every folder on the way down to it:
 Keys: arrows to move and expand/collapse, a letter to jump, Enter to select (it lists the
 scripts and asks again before running), Esc to run nothing. With no subfolders, the
 top-level scripts run without a menu, as before.
+
+## Post-install scripts for VMs (`postinstall.iso`)
+
+For virtual machines, `New-PostinstallIso.ps1` packs the repo's `.postinstall` folder into a small,
+non-bootable `postinstall.iso` to attach as a second CD-ROM. The runner builds it into the
+output directory each run (`BuildPostinstallIso` in `runner-config.json`), and only rebuilds it when
+the scripts change. It has to be attached as a disk: specialize runs as SYSTEM before
+networking, so a network share won't work. Only attach one drive with a `.postinstall` folder,
+since the first one found wins.
+
+> The scripts may contain credentials in plain text (e.g. `10-create-user.ps1`), so anyone
+> who can read `postinstall.iso` can read them.
 
 ## Weekly runs
 

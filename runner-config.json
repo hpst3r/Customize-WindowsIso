@@ -4,5 +4,6 @@
   "OutputDirectory": "Y:\\Images\\Customized",
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
+  "BuildPostinstallIso": true,
   "LogRetentionDays": 90
 }

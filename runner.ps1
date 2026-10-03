@@ -85,7 +85,7 @@ try {
   New-Item -ItemType Directory -Force -Path $Config.WorkingDirectory, $Config.OutputDirectory | Out-Null
 
   $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File | Sort-Object Name)
-  Write-Host "runner: found $($IsoFiles.Count) ISO(s): $($IsoFiles.Name -join ', ')"
+  Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
 
   foreach ($IsoFile in $IsoFiles) {
     $OutPath = Join-Path $Config.OutputDirectory $IsoFile.Name
@@ -139,6 +139,13 @@ try {
       Write-Warning "runner: $($IsoFile.Name) FAILED after $Minutes minutes; see Customize-* log in $LogDir. Previous output (if any) left in place."
     }
     $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = $Status; Minutes = $Minutes })
+  }
+
+  # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM
+  if (Get-ConfigValue $Config 'BuildPostinstallIso' $true) {
+    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath (Join-Path $Config.OutputDirectory 'postinstall.iso')
+    $Status = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Failed (exit $LASTEXITCODE)" }
+    $Results.Add([PSCustomObject]@{ Iso = 'postinstall.iso'; Status = $Status; Minutes = 0 })
   }
 
   $Failed = @($Results | Where-Object { $_.Status -like 'Failed*' -or $_.Status -eq 'Locked' })

@@ -23,15 +23,24 @@ param (
   [string] $IsoPath,
   [Parameter(Mandatory = $true)]
   [string] $WorkingDir,
-  [string] $ConfigFile = (Join-Path $PSScriptRoot 'config.json'),
-  [string] $Autounattend = (Join-Path $PSScriptRoot 'autounattend.xml'),
+  # defaults: config.json, autounattend.xml and logs\ next to this script
+  [string] $ConfigFile,
+  [string] $Autounattend,
   # optional: only used if an image has no WinRE of its own
   [string] $WinREWimPath,
-  [string] $OutPath = (Join-Path $WorkingDir 'Customized.iso'),
-  [string] $LogDir = (Join-Path $PSScriptRoot 'logs'),
+  # default: Customized.iso in the working directory
+  [string] $OutPath,
+  [string] $LogDir,
   # opaque string recorded in the output manifest; runner.ps1 uses it to skip unchanged inputs
   [string] $Fingerprint
 )
+
+# Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
+# defaults in an advanced script, so path defaults are resolved here instead
+if (-not $ConfigFile) { $ConfigFile = Join-Path $PSScriptRoot 'config.json' }
+if (-not $Autounattend) { $Autounattend = Join-Path $PSScriptRoot 'autounattend.xml' }
+if (-not $OutPath) { $OutPath = Join-Path $WorkingDir 'Customized.iso' }
+if (-not $LogDir) { $LogDir = Join-Path $PSScriptRoot 'logs' }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -121,8 +130,13 @@ function Invoke-Dism([string[]] $Arguments, [switch] $AllowFailure) {
   Invoke-Native $script:Dism ($Arguments + $Common) -SuccessExitCodes @(0, 3010) -AllowFailure:$AllowFailure
 }
 
-function Mount-Wim([string] $ImageFile, [int] $Index) {
-  Invoke-Dism @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir", '/Optimize') | Out-Null
+# /Optimize mounts faster but leaves files unhydrated; newer servicing stacks
+# (seen on 29xxx) then fail capability removal with 4350 (ERROR_FILE_OFFLINE).
+# Only use it for images that just get registry edits.
+function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize) {
+  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir")
+  if ($Optimize) { $Arguments += '/Optimize' }
+  Invoke-Dism $Arguments | Out-Null
 }
 
 function Dismount-Wim([switch] $Commit) {
@@ -359,6 +373,23 @@ function Set-InstallImage([string] $InstallWim, $Config) {
     }
   }
 
+  $Format = "$(Get-ConfigValue $Config.install 'Format' 'wim')".ToLowerInvariant()
+
+  if ($Format -eq 'esd') {
+    # install.esd with LZMS ("recovery") compression: much smaller, much slower
+    # to build. Setup uses install.esd when there is no install.wim.
+    $Esd = Join-Path (Split-Path $InstallWim) 'install.esd'
+    if (Test-Path $Esd) { Remove-Item $Esd -Force }
+    foreach ($Image in $Images) {
+      Write-Host "Set-InstallImage: exporting [$($Image.ImageIndex)] $($Image.ImageName) to install.esd (recovery compression)."
+      Invoke-Dism @('/Export-Image', "/SourceImageFile:$InstallWim", "/SourceIndex:$($Image.ImageIndex)", "/DestinationImageFile:$Esd", '/Compress:recovery') | Out-Null
+    }
+    Remove-Item $InstallWim -Force
+    return $Esd
+  }
+
+  if ($Format -ne 'wim') { throw "Set-InstallImage: install.Format must be 'wim' or 'esd', not '$Format'." }
+
   # Saving appends new data to the WIM and orphans the old; exporting every
   # index into a fresh WIM drops the dead weight (usually several hundred MB).
   if (Get-ConfigValue $Config.install 'ExportWim' $true) {
@@ -370,6 +401,7 @@ function Set-InstallImage([string] $InstallWim, $Config) {
     }
     Move-Item $Exported $InstallWim -Force
   }
+  $InstallWim
 }
 
 function Set-WinRE([string] $ImageRoot, [string] $ImageLabel, [version] $ImageVersion) {
@@ -404,7 +436,7 @@ function Set-BootImage([string] $BootWim, $BootConfig) {
   $Index = Get-SetupBootIndex $BootWim
   Write-Host "Set-BootImage: mounting boot.wim index $Index to set LabConfig ($($Values.Name -join ', '))."
 
-  Mount-Wim -ImageFile $BootWim -Index $Index
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
   $Saved = $false
   try {
     $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
@@ -511,17 +543,21 @@ function Test-IsoImage([string] $Path, [int] $ExpectedImageCount) {
     if (-not ($Volume -and $Volume.DriveLetter)) { throw "Test-IsoImage: $Path mounted but no drive letter was assigned." }
 
     $Root = "$($Volume.DriveLetter):\"
-    foreach ($Required in 'sources\install.wim', 'sources\boot.wim', 'autounattend.xml', 'bootmgr', 'efi\boot\bootx64.efi') {
+    foreach ($Required in 'sources\boot.wim', 'autounattend.xml', 'bootmgr', 'efi\boot\bootx64.efi') {
       if (-not (Test-Path (Join-Path $Root $Required))) { throw "Test-IsoImage: $Required missing from output ISO." }
     }
 
-    $Images = @(Get-WindowsImage -ImagePath (Join-Path $Root 'sources\install.wim') | ForEach-Object {
-        $Detail = Get-WindowsImage -ImagePath (Join-Path $Root 'sources\install.wim') -Index $_.ImageIndex
+    # exactly one of install.wim / install.esd
+    $Install = @('sources\install.wim', 'sources\install.esd' | ForEach-Object { Join-Path $Root $_ } | Where-Object { Test-Path $_ })
+    if ($Install.Count -ne 1) { throw "Test-IsoImage: expected one of install.wim or install.esd in output ISO, found $($Install.Count)." }
+
+    $Images = @(Get-WindowsImage -ImagePath $Install[0] | ForEach-Object {
+        $Detail = Get-WindowsImage -ImagePath $Install[0] -Index $_.ImageIndex
         [PSCustomObject]@{ Index = $Detail.ImageIndex; Name = $Detail.ImageName; Version = $Detail.Version; Size = $Detail.ImageSize }
       })
 
     if ($Images.Count -ne $ExpectedImageCount) {
-      throw "Test-IsoImage: expected $ExpectedImageCount image(s) in output install.wim, found $($Images.Count)."
+      throw "Test-IsoImage: expected $ExpectedImageCount image(s) in output $(Split-Path -Leaf $Install[0]), found $($Images.Count)."
     }
     $Images
   }
@@ -592,7 +628,8 @@ try {
   Copy-Item (Join-Path $PSScriptRoot 'stub-scripts\*') $OemPath -Recurse -Force
 
   Write-Host 'Customize-Iso: customizing install.wim.'
-  Set-InstallImage -InstallWim $InstallWim -Config $Config
+  # returns the final install image path (install.wim or install.esd)
+  $InstallImage = @(Set-InstallImage -InstallWim $InstallWim -Config $Config)[-1]
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
   Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot')
@@ -624,6 +661,7 @@ try {
     version     = $GitVersion
     fingerprint = $Fingerprint
     checksum    = $Checksum
+    format      = [System.IO.Path]::GetExtension($InstallImage).TrimStart('.')
     images      = @($Images)
     removed     = @($script:Removed)
     warnings    = @($script:Warnings)
