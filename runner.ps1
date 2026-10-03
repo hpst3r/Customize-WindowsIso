@@ -13,7 +13,12 @@ An ISO is skipped when its customized output already exists and was built from
 the same input ISO with the same config, unattend, stubs, and script. Use
 -Force to rebuild everything.
 
-Exit code is 0 if every ISO succeeded or was skipped, 1 otherwise.
+With DeleteSourceAfterBuild (default), a source ISO is deleted once its output
+is current, keeping its .iso.json and .sha256.txt; an output that later needs
+rebuilding is reported as Stale, with the command to download the source again.
+
+Exit code is 0 if every ISO succeeded or was skipped, 1 otherwise (including
+stale images whose source was deleted).
 
 Every run writes a machine-readable summary to <LogDirectory>\last-run-runner.json
 (and runner-<timestamp>.json beside the transcript) for Send-BuildNotification.ps1.
@@ -41,6 +46,8 @@ $LogDir = Get-ConfigValue $Config 'LogDirectory' (Join-Path $PSScriptRoot 'logs'
 $LogRetentionDays = Get-ConfigValue $Config 'LogRetentionDays' 90
 # keep the ISO a rebuild replaces as <name>.previous.iso in the output directory
 $KeepPrevious = [bool](Get-ConfigValue $Config 'KeepPrevious' $true)
+# delete a source ISO once its output is current, keeping its .iso.json and .sha256.txt
+$DeleteSource = [bool](Get-ConfigValue $Config 'DeleteSourceAfterBuild' $true)
 
 # optional virtio-win ISO: drivers go into the images, guest tools onto postinstall.iso
 $VirtIO = Get-ConfigValue $Config 'VirtIO'
@@ -82,6 +89,43 @@ function Test-FileLocked([string] $Path) {
   try { [System.IO.File]::Open($Path, 'Open', 'Read', 'Read').Dispose(); $false } catch { $true }
 }
 
+#region deleted sources
+
+# Inputs: every ISO, plus every image whose ISO was deleted after it was customized
+# (DeleteSourceAfterBuild) but whose .iso.sha256.txt/.iso.json from Get-WindowsIso remain.
+# The latter come back as FileInfo objects for the missing ISO: Get-BuildFingerprint only
+# needs the .sha256.txt for those (a missing file's LastWriteTimeUtc is year 1601).
+function Get-InputImages([string] $Directory) {
+  $Isos = @(Get-ChildItem -Path $Directory -Filter '*.iso' -File |
+      Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' })
+  $Deleted = @(Get-ChildItem -Path $Directory -File |
+      Where-Object { $_.Name -like '*.iso.sha256.txt' -or $_.Name -like '*.iso.json' } |
+      ForEach-Object { $_.Name -replace '\.(sha256\.txt|json)$', '' } |
+      Where-Object { $_ -notlike '*.previous.iso' } | Sort-Object -Unique |
+      Where-Object { -not (Test-Path -LiteralPath (Join-Path $Directory $_)) } |
+      ForEach-Object { [System.IO.FileInfo] (Join-Path $Directory $_) })
+  @($Isos + $Deleted | Sort-Object Name)
+}
+
+# Delete a source ISO whose output is current. Its .sha256.txt (for the fingerprint) and
+# .iso.json (so Get-WindowsIso knows the build is already published) stay, so the ISO is
+# only deleted if both are there and the checksum is at least as new as the ISO.
+function Remove-SourceIso([System.IO.FileInfo] $Iso) {
+  $Sidecar = "$($Iso.FullName).sha256.txt"
+  if (-not ((Test-Path $Sidecar) -and (Test-Path "$($Iso.FullName).json") -and
+      (Get-Item $Sidecar).LastWriteTimeUtc -ge $Iso.LastWriteTimeUtc)) {
+    Write-Warning "runner: keeping source $($Iso.Name): it has no current .sha256.txt and .json beside it."
+    return
+  }
+  try {
+    Remove-Item -LiteralPath $Iso.FullName -Force
+    Write-Host "runner: deleted source $($Iso.Name) (kept its .json and .sha256.txt)."
+  }
+  catch { Write-Warning "runner: could not delete source $($Iso.Name): $_" }
+}
+
+#endregion
+
 #region run summary
 
 # Parsed JSON file, or $null if it is missing or unreadable
@@ -117,6 +161,8 @@ function ConvertTo-SummaryItem($Row) {
     imageVersions   = @($Images | ForEach-Object { Get-ConfigValue $_ 'Version' } | Where-Object { $_ } | Sort-Object -Unique)
     editions        = @($Images | ForEach-Object { Get-ConfigValue $_ 'Name' })
     built           = Get-ConfigValue $Manifest 'built'
+    # the source ISO is gone (deleted after customizing, see DeleteSourceAfterBuild)
+    sourceDeleted   = $Row.Iso -like '*.iso' -and $Row.Iso -ne 'postinstall.iso' -and -not (Test-Path -LiteralPath (Join-Path $Config.InputDirectory $Row.Iso))
   }
 }
 
@@ -174,16 +220,24 @@ try {
   if ($VirtIOIso) { Write-Host "runner: adding virtio-win drivers ($VirtIODrivers) from $VirtIOIso." }
 
   # *.previous.iso is a kept copy of an older output, never an input
-  $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File |
-      Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' } | Sort-Object Name)
-  Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
+  $IsoFiles = @(Get-InputImages $Config.InputDirectory)
+  $SourceDeleted = @($IsoFiles | Where-Object { -not $_.Exists })
+  Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')$(if ($SourceDeleted) { " ($($SourceDeleted.Count) already customized and deleted)" })"
 
   foreach ($IsoFile in $IsoFiles) {
     $OutPath = Join-Path $Config.OutputDirectory $IsoFile.Name
     $WorkingDirectory = Join-Path $Config.WorkingDirectory ($IsoFile.BaseName -replace '[^\w.-]', '')
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
-    if (Test-FileLocked $IsoFile.FullName) {
+    # source deleted after an earlier build: only the .sha256.txt can say whether the output is current
+    if (-not $IsoFile.Exists -and -not (Test-Path "$($IsoFile.FullName).sha256.txt")) {
+      $Status = "Stale: source ISO and its .sha256.txt are missing - rerun Get-WindowsIso for $($IsoFile.Name), or delete its .json from $($Config.InputDirectory)"
+      Write-Warning "runner: $($IsoFile.Name): $Status"
+      $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = $Status; Minutes = 0 })
+      continue
+    }
+
+    if ($IsoFile.Exists -and (Test-FileLocked $IsoFile.FullName)) {
       Write-Warning "runner: $($IsoFile.Name) is in use (still being written?). Skipping this run."
       $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = 'Locked'; Minutes = 0 })
       continue
@@ -196,8 +250,19 @@ try {
       if ((Get-ConfigValue $Manifest 'fingerprint') -eq $Fingerprint) {
         Write-Host "runner: $($IsoFile.Name) is unchanged since its last build. Skipping."
         $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = 'UpToDate'; Minutes = 0 })
+        # the output was built from exactly this source, so it can go (e.g. the first run with DeleteSourceAfterBuild)
+        if ($DeleteSource -and $IsoFile.Exists) { Remove-SourceIso $IsoFile }
         continue
       }
+    }
+
+    # the output is out of date (or -Force) but there is nothing to rebuild it from
+    if (-not $IsoFile.Exists) {
+      $Version = Get-ConfigValue (Read-JsonFile "$($IsoFile.FullName).json") 'name' $IsoFile.BaseName
+      $Status = "Stale: source deleted - rerun Get-WindowsIso: stub.ps1 -Force -Version '$Version', then runner.ps1"
+      Write-Warning "runner: $($IsoFile.Name) needs rebuilding (its inputs changed, or -Force) but its source ISO was deleted. $Status"
+      $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = $Status; Minutes = 0 })
+      continue
     }
 
     Write-Host "runner: customizing $($IsoFile.Name) in $WorkingDirectory."
@@ -226,6 +291,7 @@ try {
       Write-Host "runner: $($IsoFile.Name) done in $Minutes minutes: $Status."
       # keep the working directory on failure for troubleshooting; it is reused next run
       Remove-Item $WorkingDirectory -Recurse -Force -ErrorAction Continue
+      if ($DeleteSource) { Remove-SourceIso $IsoFile }
     }
     else {
       $Status = "Failed (exit $($Process.ExitCode))"
@@ -245,7 +311,8 @@ try {
     $Results.Add([PSCustomObject]@{ Iso = 'postinstall.iso'; Status = $Status; Minutes = 0 })
   }
 
-  $Failed = @($Results | Where-Object { $_.Status -like 'Failed*' -or $_.Status -eq 'Locked' })
+  # stale images (source deleted) need someone to act, so they fail the run too
+  $Failed = @($Results | Where-Object { $_.Status -like 'Failed*' -or $_.Status -eq 'Locked' -or $_.Status -like 'Stale*' })
   $ExitCode = if ($Failed) { 1 } else { 0 }
 }
 catch {

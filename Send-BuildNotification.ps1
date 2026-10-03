@@ -174,7 +174,7 @@ function New-Report($Stages, [bool] $Detailed) {
           $Build = @(Get-ConfigValue $Item 'build'; @(Get-ConfigValue $Item 'imageVersions' @()) -join ', ') | Where-Object { $_ } | Select-Object -First 1
           "  OK     $($Item.name)$(if ($Build) { ": $Build" })"
         }
-        'Stale' { "  STALE  $($Item.name): $($Item.status)" }
+        'Stale' { "  STALE  $($Item.name): $($Item.status -replace '^Stale:\s*', '')" }
         default { "  FAILED $($Item.name): $($Item.status)$(if ($Item.minutes) { " after $($Item.minutes) min" })" }
       }
       $Lines.Add($Line)
@@ -185,7 +185,8 @@ function New-Report($Stages, [bool] $Detailed) {
     $Lines.Add('')
   }
 
-  $WarningCount = ($Rebuilt | Measure-Object -Property warnings -Sum).Sum
+  $WarningCount = 0
+  foreach ($Item in $Rebuilt) { $WarningCount += [int](Get-ConfigValue $Item 'warnings' 0) }
   if ($NewBuilds.Count) { $Lines.Add("New Windows builds: $(@($NewBuilds | ForEach-Object { "$($_.name) $($_.build)" }) -join '; ')") }
   $Lines.Add("Warnings in rebuilt images: $([int]$WarningCount)")
   foreach ($Stage in $Stages) {

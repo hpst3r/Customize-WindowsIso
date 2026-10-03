@@ -149,6 +149,36 @@ time. It skips an ISO when the output already exists and was built from the same
 with the same config, unattend, stubs, and script. Pass `-Force` to rebuild everything.
 Exit code is non-zero if any ISO failed, so Task Scheduler's *Last Run Result* shows it.
 
+### Deleting source ISOs (`DeleteSourceAfterBuild`)
+
+To save space, once an ISO's customized output is current (just built, or found up to date)
+the runner deletes the source ISO from `InputDirectory`, keeping its `.iso.json` and
+`.iso.sha256.txt` (`DeleteSourceAfterBuild`, default `true`). It only deletes an ISO whose
+`.sha256.txt` is at least as new as the ISO, and only if the `.iso.json` is there too. That is
+enough for both stages to keep working:
+
+- The runner's fingerprint uses the source's SHA-256 from the `.sha256.txt`, so it can still
+  tell that an output is up to date without the ISO.
+- Get-WindowsIso's `stub.ps1` skips a version when the `.iso.json` already has the latest
+  uupdump build, ISO or not. A new build is downloaded as usual, customized, then deleted.
+
+The first run after turning this on finds every output up to date and deletes the sources.
+
+If an output needs rebuilding but its source is gone, because `config.json`, `autounattend.xml`,
+the stubs, `Customize-Iso.ps1` or the virtio-win ISO changed (or with `-Force`), the runner
+can't rebuild it. It reports the image as **Stale** (result `Stale`, in the summary, the
+notification and the index page) with the command to fix it, and exits non-zero:
+
+```PowerShell
+Y:\src\Get-WindowsIso\stub.ps1 -Force -Version 'Windows Server 2022'   # downloads it again
+.\runner.ps1                                                            # or wait for next week
+```
+
+So with this on, **any change to those inputs means downloading every image again**. Turn it
+off (`"DeleteSourceAfterBuild": false`) while you are changing the configuration. To retire an
+image, delete its `.iso.json` and `.iso.sha256.txt` from `InputDirectory` too; otherwise
+it is reported as stale.
+
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
 `stub.ps1`, then `runner.ps1`, then `Send-BuildNotification.ps1` (see Notifications):
 

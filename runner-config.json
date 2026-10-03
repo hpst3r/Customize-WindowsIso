@@ -7,6 +7,7 @@
   "BuildPostinstallIso": true,
   "KeepPrevious": true,
   "BuildIndex": true,
+  "DeleteSourceAfterBuild": true,
   "VirtIO": {
     "IsoPath": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
     "Drivers": ["vioscsi", "viostor", "NetKVM"]
