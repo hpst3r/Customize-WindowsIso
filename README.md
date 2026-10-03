@@ -197,6 +197,36 @@ per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`),
 warnings, and the source build, image versions and editions from the manifests.
 Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
 
+## Checking a customized ISO (`Test-CustomizedIso.ps1`)
+
+`Test-CustomizedIso.ps1` mounts a customized ISO read-only and checks it against `config.json`:
+boot files, `autounattend.xml` (no `InstallFrom` when there are several editions), the `$OEM$`
+stubs (against `stub-scripts\`), and for every image in `install.wim`/`install.esd`: WinRE is
+present, none of the configured AppX packages/capabilities/packages is left, every value of the
+enabled `Registry` groups is set (or deleted) in the image's hives, and the drivers the ISO's
+manifest lists are installed. In `boot.wim` it checks the `LabConfig` values and drivers. It
+uses `dism.exe /Mount-Image /ReadOnly` and `reg.exe` and changes nothing.
+
+```PowerShell
+.\Test-CustomizedIso.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -OutputDirectory Y:\IsoBuild\Logs
+```
+
+It writes `Test-<name>-<timestamp>.txt` and `.json` reports (default `logs\`) and exits 0 if
+every check passed, 1 otherwise. `-ConfigFile` checks against another config, `-ExpectDrivers`
+overrides the drivers expected from the manifest, and `-WorkingDir` sets the scratch folder for
+the mount point (an `install.esd` is exported to a WIM there first, which is slow).
+
+Loading the image hives (`reg load`) and querying a mounted image (`dism /Image:`) need an
+elevated session with backup/restore privileges; in a restricted or sandboxed session they
+fail, and the script stops with a message saying so. Running it as SYSTEM always works, e.g.
+through a temporary scheduled task:
+
+```PowerShell
+$Action = New-ScheduledTaskAction -Execute powershell.exe -Argument '-NoProfile -ExecutionPolicy Bypass -File Y:\src\Customize-WindowsIso\Test-CustomizedIso.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -OutputDirectory Y:\IsoBuild\Logs'
+Register-ScheduledTask -TaskName 'Test customized ISO' -Action $Action -Principal (New-ScheduledTaskPrincipal -UserId SYSTEM -LogonType ServiceAccount -RunLevel Highest) -Force
+Start-ScheduledTask 'Test customized ISO'   # then read the report; Unregister-ScheduledTask when done
+```
+
 ## Index page
 
 At the end of every run (even if some ISOs failed) the runner calls `New-ImageIndex.ps1`, which
