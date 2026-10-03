@@ -307,9 +307,11 @@ function Remove-ImagePackages([string] $ImageRoot, $PackageConfig, [string] $Ima
 #region images
 
 # Dismount any image left mounted under this working directory, discard
-# changes, and drop stale mount points. Safe to call at any time.
+# changes, and drop stale mount points. Safe to call at any time, including
+# while other DISM work (another build, uupdump's converter) runs on this machine.
 function Clear-StaleMounts {
-  $Mounted = @(Get-WindowsImage -Mounted | Where-Object { $_.Path -like "$($WorkingDir)*" })
+  $AllMounted = @(Get-WindowsImage -Mounted)
+  $Mounted = @($AllMounted | Where-Object { $_.Path -like "$($WorkingDir)*" })
   # nested mounts first: Winre.wim in MountRE lives inside the image mounted at Mount
   $Mounted = @($Mounted | Sort-Object { $Image = $_; -not @($Mounted | Where-Object { $Image.ImagePath -like "$($_.Path)\*" }) })
   foreach ($Image in $Mounted) {
@@ -317,7 +319,17 @@ function Clear-StaleMounts {
     $Result = Invoke-Dism @('/Unmount-Image', "/MountDir:$($Image.Path)", '/Discard') -AllowFailure
     if ($Result.ExitCode -ne 0) { Write-Warning "Clear-StaleMounts: dismount failed for $($Image.Path): $($Result.Output -join ' | ')" }
   }
-  Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
+
+  # /Cleanup-Mountpoints is machine-wide: run mid-commit by another process, it removed
+  # that build's mount record and its save failed (0x80070057). Only run it when
+  # nothing outside this working directory is mounted.
+  $Foreign = @($AllMounted | Where-Object { $_.Path -notlike "$($WorkingDir)*" })
+  if ($Foreign) {
+    Write-Host "Clear-StaleMounts: $($Foreign.Count) other image(s) mounted on this machine; skipping /Cleanup-Mountpoints."
+  }
+  else {
+    Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
+  }
 }
 
 # Volume of an attached ISO. The drive letter can take a moment to appear after mounting.
