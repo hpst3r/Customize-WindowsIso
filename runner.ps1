@@ -37,10 +37,9 @@ $RecoveryWim = Get-ConfigValue $Config 'RecoveryWimPath' ''
 $LogDir = Get-ConfigValue $Config 'LogDirectory' (Join-Path $PSScriptRoot 'logs')
 $LogRetentionDays = Get-ConfigValue $Config 'LogRetentionDays' 90
 
-# optional virtio-win ISO: drivers go into the images, guest tools onto postinstall.iso
-$VirtIO = Get-ConfigValue $Config 'VirtIO'
-$VirtIOIso = Get-ConfigValue $VirtIO 'IsoPath' ''
-$VirtIODrivers = @(Get-ConfigValue $VirtIO 'Drivers' @('vioscsi', 'viostor', 'NetKVM')) -join ','
+# driver sets (DriverSets, or the older VirtIO block): validated in the try block below
+. (Join-Path $PSScriptRoot 'DriverSets.ps1')
+$DriverSets = @()
 
 # Identify everything that affects the output. If none of it has changed since
 # the last successful build, rebuilding would produce the same ISO.
@@ -54,18 +53,15 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
     "file:$($Iso.Length):$($Iso.LastWriteTimeUtc.Ticks)"
   }
 
-  $Inputs = @($BuildScript, $CustomizeConfig, $Autounattend) +
+  $Inputs = @($BuildScript, (Join-Path $PSScriptRoot 'DriverSets.ps1'), $CustomizeConfig, $Autounattend) +
     @(Get-ChildItem (Join-Path $PSScriptRoot 'stub-scripts') -File -Recurse | Sort-Object FullName | ForEach-Object FullName)
   $Hashes = $Inputs | ForEach-Object { (Get-FileHash -Algorithm SHA256 $_).Hash }
   if ($RecoveryWim -and (Test-Path $RecoveryWim)) {
     $Item = Get-Item $RecoveryWim
     $Hashes += "winre:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks)"
   }
-  # a replaced virtio-win ISO (new driver version) or driver list rebuilds everything
-  if ($VirtIOIso) {
-    $Item = Get-Item $VirtIOIso
-    $Hashes += "virtio:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks):$VirtIODrivers"
-  }
+  # a replaced virtio-win ISO, changed driver folder or set definition rebuilds everything
+  foreach ($Set in $DriverSets) { $Hashes += Get-DriverSetFingerprint $Set }
 
   $Bytes = [System.Text.Encoding]::UTF8.GetBytes((@($Source) + $Hashes) -join '|')
   $Sha = [System.Security.Cryptography.SHA256]::Create()
@@ -94,11 +90,14 @@ try {
 
   New-Item -ItemType Directory -Force -Path $Config.WorkingDirectory, $Config.OutputDirectory | Out-Null
 
-  # configured but missing: fail rather than quietly build images without the drivers
-  if ($VirtIOIso -and -not (Test-Path $VirtIOIso)) {
-    throw "runner: VirtIO.IsoPath is set but $VirtIOIso does not exist. Put a virtio-win ISO there or clear VirtIO.IsoPath."
+  # configured but missing: Get-DriverSets fails rather than quietly building images without the drivers
+  $DriverSets = @(Get-DriverSets $Config)
+  foreach ($Set in $DriverSets) {
+    Write-Host "runner: driver set '$($Set.Name)' ($($Set.Type)) from $($Set.Path) to $($Set.Targets -join ', ')$(if ($Set.Drivers) { ": $($Set.Drivers -join ', ')" })."
   }
-  if ($VirtIOIso) { Write-Host "runner: adding virtio-win drivers ($VirtIODrivers) from $VirtIOIso." }
+  # postinstall.iso gets the guest tools from the (first) virtio-win ISO
+  $VirtIOIso = @($DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Path) | Select-Object -First 1
+  if (-not $VirtIOIso) { $VirtIOIso = '' }
 
   $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File | Sort-Object Name)
   Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
@@ -139,7 +138,13 @@ try {
       '-Fingerprint', $Fingerprint
     )
     if ($RecoveryWim) { $Arguments += @('-WinREWimPath', "`"$RecoveryWim`"") }
-    if ($VirtIOIso) { $Arguments += @('-VirtIOIsoPath', "`"$VirtIOIso`"", '-VirtIODrivers', $VirtIODrivers) }
+    if ($DriverSets) {
+      # structured data doesn't survive a powershell.exe -File command line; hand over a file
+      New-Item -ItemType Directory -Force -Path $WorkingDirectory | Out-Null
+      $DriverSetsFile = Join-Path $WorkingDirectory 'driversets.json'
+      [PSCustomObject]@{ DriverSets = $DriverSets } | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8 -Path $DriverSetsFile
+      $Arguments += @('-DriverSetsFile', "`"$DriverSetsFile`"")
+    }
 
     $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     $Minutes = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)

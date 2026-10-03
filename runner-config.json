@@ -5,9 +5,21 @@
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
-  "VirtIO": {
-    "IsoPath": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
-    "Drivers": ["vioscsi", "viostor", "NetKVM"]
-  },
+  "DriverSets": [
+    {
+      "Name": "VirtIO",
+      "Type": "virtio-iso",
+      "Path": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
+      "Drivers": ["vioscsi", "viostor", "NetKVM"],
+      "Targets": ["boot", "install", "winre"]
+    },
+    {
+      "Name": "Storage",
+      "Type": "folder",
+      "Path": "Y:\\IsoBuild\\Drivers\\Storage",
+      "Targets": ["boot", "install", "winre"],
+      "Enabled": false
+    }
+  ],
   "LogRetentionDays": 90
 }
