@@ -1,0 +1,38 @@
+
+Microsoft DiskPart version 10.0.26100.1150
+
+Copyright (C) Microsoft Corporation.
+On computer: MINWINPC
+
+Disk 0 is now the selected disk.
+
+QEMU QEMU HARDDISK SCSI Disk Device
+Disk ID: {6C774851-BBBF-40EC-A381-69977171C5F6}
+Type   : SAS
+Status : Online
+Path   : 0
+Target : 0
+LUN ID : 0
+Location Path : PCIROOT(0)#PCI(1E00)#PCI(0400)#PCI(0100)#SAS(P00T00L00)
+Current Read-only State : No
+Read-only  : No
+Boot Disk  : Yes
+Pagefile Disk  : Yes
+Hibernation File Disk  : No
+Crashdump Disk  : Yes
+Clustered Disk  : No
+
+  Volume ###  Ltr  Label        Fs     Type        Size     Status     Info
+  ----------  ---  -----------  -----  ----------  -------  ---------  --------
+  Volume 3     C                NTFS   Partition     63 GB  Healthy    Boot    
+  Volume 4                      FAT32  Partition    100 MB  Healthy    System  
+  Volume 5                      NTFS   Partition    664 MB  Healthy    Hidden  
+
+  Partition ###  Type              Size     Offset
+  -------------  ----------------  -------  -------
+  Partition 1    System             100 MB  1024 KB
+  Partition 2    Reserved            16 MB   101 MB
+  Partition 3    Primary             63 GB   117 MB
+  Partition 4    Recovery           664 MB    63 GB
+
+Leaving DiskPart...

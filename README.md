@@ -44,8 +44,9 @@ If an image has several editions (e.g. the four Windows Server editions), the
 `/IMAGE/INDEX` selection is removed from the unattend so Setup asks which edition to
 install. With a single edition, Setup installs it without asking.
 
-> **Warning:** the unattend wipes disk 0 without prompting, and the ISO boots
-> without "press any key" on UEFI (`iso.NoPrompt`). Don't leave it attached to a machine you care about.
+> **Warning:** the unattend wipes disk 0 without prompting (unless `iso.DiskPicker` is on; see
+> below), and the ISO boots without "press any key" on UEFI (`iso.NoPrompt`). Don't leave it
+> attached to a machine you care about.
 
 ## Configuration (`config.json`)
 
@@ -63,6 +64,40 @@ install. With a single edition, Setup installs it without asking.
 - `install.ExportWim`: with `wim`, re-export `install.wim` after servicing to drop orphaned data (smaller ISO)
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
+- `iso.DiskPicker` (default `false`): choose the install disk in WinPE instead of wiping disk 0 (below)
+- `iso.DiskPickerMinSizeGB` (default `50`): smallest disk the picker installs to without asking
+
+## Choosing the install disk (`iso.DiskPicker`)
+
+> Not yet tested on real hardware or VMs. Off by default; with it off, the ISO is built exactly as before.
+
+With `iso.DiskPicker` on, the ISO no longer wipes disk 0 blindly. A script in the Setup image of
+`boot.wim` (`winpe\diskpicker.cmd`, started by `winpeshl.ini` instead of Setup) looks at the disks first:
+
+- **One internal disk of `DiskPickerMinSizeGB` or more:** it is wiped and Windows is installed on it
+  with no questions, as before (single-disk VMs stay unattended).
+- **Several:** a numbered menu shows each disk's number, size, bus type, model, partition count and
+  volumes. Type a disk number, then `YES`, to wipe it and install. Smaller internal disks are listed
+  too but never chosen automatically (e.g. a 16 GB Optane module next to an SSD is ignored).
+- **None:** it says so (usually a missing storage driver: Intel RST/VMD, RAID, virtio) and offers to
+  load a driver (`drvload`) and rescan.
+
+USB and SD disks, the disk holding the install media (a volume with `\sources\boot.wim`) and Ventoy
+disks are never offered. The menu also has `S` (run Setup and choose/partition the disk on its own
+page), `C` (command prompt), `R` (rescan), `B`/`P` (reboot/power off).
+
+The chosen disk gets the same layout the answer file used for disk 0 (UEFI: EFI 260 MB, MSR 16 MB,
+Windows), or MBR with a 100 MB active system partition when booted in BIOS mode. The script then
+starts Setup with `/unattend:` pointing at a copy of the media's answer file with `InstallTo` set to
+that disk. The media's own `autounattend.xml` has no disk settings, so if Setup ever starts without
+the picker (`S`, or a future boot.wim that ignores `winpeshl.ini`), Setup asks for the disk rather
+than wiping one.
+
+The picker uses only cmd and diskpart: the Setup image has no `findstr`, `choice` or `wmic`, and
+Server 2022's has no PowerShell, so it's a typed menu rather than an arrow-key one.
+Its log is `X:\DiskPicker\work\diskpicker.log` (Shift+F10 in Setup, or `C` in the menu).
+`winpe\tests\Test-DiskPicker.ps1` runs it against recorded and made-up diskpart output in a
+test mode that never partitions anything or starts Setup.
 
 ## Post-install scripts
 
@@ -137,7 +172,7 @@ virtio-scsi disk.
 
 `runner.ps1` customizes every ISO in `InputDirectory` (see `runner-config.json`) one at a
 time. It skips an ISO when the output already exists and was built from the same input
-with the same config, unattend, stubs, and script. Pass `-Force` to rebuild everything.
+with the same config, unattend, stubs, WinPE scripts, and script. Pass `-Force` to rebuild everything.
 Exit code is non-zero if any ISO failed, so Task Scheduler's *Last Run Result* shows it.
 
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
