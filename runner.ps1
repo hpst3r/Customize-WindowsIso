@@ -37,6 +37,11 @@ $RecoveryWim = Get-ConfigValue $Config 'RecoveryWimPath' ''
 $LogDir = Get-ConfigValue $Config 'LogDirectory' (Join-Path $PSScriptRoot 'logs')
 $LogRetentionDays = Get-ConfigValue $Config 'LogRetentionDays' 90
 
+# optional virtio-win ISO: drivers go into the images, guest tools onto postinstall.iso
+$VirtIO = Get-ConfigValue $Config 'VirtIO'
+$VirtIOIso = Get-ConfigValue $VirtIO 'IsoPath' ''
+$VirtIODrivers = @(Get-ConfigValue $VirtIO 'Drivers' @('vioscsi', 'viostor', 'NetKVM')) -join ','
+
 # Identify everything that affects the output. If none of it has changed since
 # the last successful build, rebuilding would produce the same ISO.
 function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
@@ -55,6 +60,11 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
   if ($RecoveryWim -and (Test-Path $RecoveryWim)) {
     $Item = Get-Item $RecoveryWim
     $Hashes += "winre:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks)"
+  }
+  # a replaced virtio-win ISO (new driver version) or driver list rebuilds everything
+  if ($VirtIOIso) {
+    $Item = Get-Item $VirtIOIso
+    $Hashes += "virtio:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks):$VirtIODrivers"
   }
 
   $Bytes = [System.Text.Encoding]::UTF8.GetBytes((@($Source) + $Hashes) -join '|')
@@ -83,6 +93,12 @@ try {
   Write-Host "runner: input $($Config.InputDirectory), output $($Config.OutputDirectory), working $($Config.WorkingDirectory)."
 
   New-Item -ItemType Directory -Force -Path $Config.WorkingDirectory, $Config.OutputDirectory | Out-Null
+
+  # configured but missing: fail rather than quietly build images without the drivers
+  if ($VirtIOIso -and -not (Test-Path $VirtIOIso)) {
+    throw "runner: VirtIO.IsoPath is set but $VirtIOIso does not exist. Put a virtio-win ISO there or clear VirtIO.IsoPath."
+  }
+  if ($VirtIOIso) { Write-Host "runner: adding virtio-win drivers ($VirtIODrivers) from $VirtIOIso." }
 
   $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File | Sort-Object Name)
   Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
@@ -123,6 +139,7 @@ try {
       '-Fingerprint', $Fingerprint
     )
     if ($RecoveryWim) { $Arguments += @('-WinREWimPath', "`"$RecoveryWim`"") }
+    if ($VirtIOIso) { $Arguments += @('-VirtIOIsoPath', "`"$VirtIOIso`"", '-VirtIODrivers', $VirtIODrivers) }
 
     $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     $Minutes = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
@@ -143,7 +160,7 @@ try {
 
   # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM
   if (Get-ConfigValue $Config 'BuildPostinstallIso' $true) {
-    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath (Join-Path $Config.OutputDirectory 'postinstall.iso')
+    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath (Join-Path $Config.OutputDirectory 'postinstall.iso') -VirtIOIsoPath $VirtIOIso
     $Status = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Failed (exit $LASTEXITCODE)" }
     $Results.Add([PSCustomObject]@{ Iso = 'postinstall.iso'; Status = $Status; Minutes = 0 })
   }

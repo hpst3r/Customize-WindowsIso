@@ -1,4 +1,4 @@
-# Customize-WindowsIso
+﻿# Customize-WindowsIso
 
 Set of scripts to take a Windows ISO and:
 
@@ -100,6 +100,38 @@ since the first one found wins.
 
 > The scripts may contain credentials in plain text (e.g. `10-create-user.ps1`), so anyone
 > who can read `postinstall.iso` can read them.
+
+## VirtIO drivers (QEMU/KVM, Proxmox)
+
+To install onto **virtio-scsi** (or virtio-blk) disks, Setup and the installed OS both need
+the storage driver, so it has to be in the images, not only on a second disk. With a
+virtio-win ISO configured, every customized ISO gets:
+
+- the drivers in `VirtIO.Drivers` (default `vioscsi`, `viostor`, `NetKVM`) added to the Setup
+  image in `boot.wim`, so Setup sees the disk, and to every image in `install.wim`, so the
+  installed OS boots from it and has networking for the OOBE scripts
+- the matching OS folder from the virtio-win ISO: `w11` (client), `2k22`, `2k25` (server)
+
+`postinstall.iso` also gets `virtio\virtio-win-guest-tools.exe` and its SHA-256, and
+`.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs it silently (balloon, serial,
+QEMU guest agent, SPICE agent, the remaining drivers) when the machine has VirtIO devices.
+On anything else it does nothing.
+
+The installers in upstream (Fedora) virtio-win builds are unsigned; only the drivers are
+(WHQL), and Windows checks those at install time. So the installer is accepted when building
+`postinstall.iso` if it is validly signed or unsigned (a broken signature is rejected), and the
+OOBE script only runs it if it is validly signed or matches the SHA-256 recorded at build time.
+
+The virtio-win ISO isn't downloaded automatically. The fedorapeople.org directory listings are
+behind a browser challenge, though direct file links work, e.g.
+`curl -LO https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso`.
+Put the ISO at `VirtIO.IsoPath` in `runner-config.json`
+(default `Y:\IsoBuild\Cache\virtio-win.iso`); replacing it with a newer one rebuilds every ISO
+on the next run. If the path is set but the file is missing, the run fails rather than building
+images without the drivers. Clear `VirtIO.IsoPath` to turn this off.
+
+The drivers are not added to WinRE inside the images, so the recovery environment won't see a
+virtio-scsi disk.
 
 ## Weekly runs
 

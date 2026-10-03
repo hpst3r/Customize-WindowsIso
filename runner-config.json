@@ -5,5 +5,9 @@
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
+  "VirtIO": {
+    "IsoPath": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
+    "Drivers": ["vioscsi", "viostor", "NetKVM"]
+  },
   "LogRetentionDays": 90
 }

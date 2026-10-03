@@ -23,6 +23,9 @@ param (
   [string] $Source,
   # default: postinstall.iso next to this script
   [string] $OutPath,
+  # optional: a virtio-win ISO. Its virtio-win-guest-tools.exe is added as
+  # virtio\virtio-win-guest-tools.exe for the OOBE script that installs it.
+  [string] $VirtIOIsoPath,
   [switch] $Force
 )
 
@@ -39,9 +42,15 @@ try {
   if (-not (Test-Path $Source -PathType Container)) { throw "New-PostinstallIso: source folder not found: $Source" }
   $Source = (Resolve-Path $Source).Path
 
-  # fingerprint: relative path and content hash of every file
+  if ($VirtIOIsoPath -and -not (Test-Path $VirtIOIsoPath)) { throw "New-PostinstallIso: virtio-win ISO not found: $VirtIOIsoPath" }
+
+  # fingerprint: relative path and content hash of every file, plus the virtio-win ISO
   $Files = @(Get-ChildItem $Source -Recurse -File -Force | Sort-Object FullName)
-  $Entries = $Files | ForEach-Object { "$($_.FullName.Substring($Source.Length)):$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash)" }
+  $Entries = @($Files | ForEach-Object { "$($_.FullName.Substring($Source.Length)):$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash)" })
+  if ($VirtIOIsoPath) {
+    $Item = Get-Item $VirtIOIsoPath
+    $Entries += "virtio:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks)"
+  }
   $Sha = [System.Security.Cryptography.SHA256]::Create()
   try {
     $Fingerprint = -join ($Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes(($Entries -join '|'))) | ForEach-Object { $_.ToString('x2') })
@@ -67,6 +76,42 @@ try {
     New-Item -ItemType Directory -Force -Path $Staging, (Split-Path $OutPath) | Out-Null
     Copy-Item $Source (Join-Path $Staging '.postinstall') -Recurse -Force
 
+    $VirtIOLabel = $null
+    if ($VirtIOIsoPath) {
+      $DiskImage = Get-DiskImage -ImagePath $VirtIOIsoPath
+      $MountedHere = -not $DiskImage.Attached
+      if ($MountedHere) { $DiskImage = Mount-DiskImage -ImagePath $VirtIOIsoPath -StorageType ISO -Access ReadOnly -PassThru }
+      try {
+        $Volume = $null
+        for ($i = 0; $i -lt 30 -and -not ($Volume -and $Volume.DriveLetter); $i++) {
+          $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
+          if (-not ($Volume -and $Volume.DriveLetter)) { Start-Sleep -Seconds 1 }
+        }
+        if (-not ($Volume -and $Volume.DriveLetter)) { throw "New-PostinstallIso: $VirtIOIsoPath mounted but no drive letter was assigned." }
+
+        $GuestTools = "$($Volume.DriveLetter):\virtio-win-guest-tools.exe"
+        if (-not (Test-Path $GuestTools)) { throw "New-PostinstallIso: virtio-win-guest-tools.exe not found on $VirtIOIsoPath." }
+        # upstream (Fedora) builds of the installer are unsigned; RHEL builds are signed.
+        # Either is fine, but a signature that no longer matches means the file was modified.
+        $Signature = Get-AuthenticodeSignature $GuestTools
+        if ($Signature.Status -notin 'Valid', 'NotSigned') {
+          throw "New-PostinstallIso: virtio-win-guest-tools.exe has a bad signature ($($Signature.Status)); refusing to use it."
+        }
+
+        $VirtIODir = Join-Path $Staging 'virtio'
+        New-Item -ItemType Directory -Force -Path $VirtIODir | Out-Null
+        Copy-Item $GuestTools $VirtIODir -Force
+        # the OOBE script checks an unsigned installer against this before running it
+        $GuestToolsHash = (Get-FileHash -Algorithm SHA256 (Join-Path $VirtIODir 'virtio-win-guest-tools.exe')).Hash.ToLowerInvariant()
+        Set-Content -Encoding ascii -NoNewline -Path (Join-Path $VirtIODir 'virtio-win-guest-tools.exe.sha256') -Value $GuestToolsHash
+        $VirtIOLabel = $Volume.FileSystemLabel
+        Write-Host "New-PostinstallIso: added virtio-win-guest-tools.exe from $VirtIOLabel ($($Signature.Status), sha256 $GuestToolsHash)."
+      }
+      finally {
+        if ($MountedHere) { Dismount-DiskImage -ImagePath $VirtIOIsoPath | Out-Null }
+      }
+    }
+
     $Partial = "$OutPath.partial"
     if (Test-Path $Partial) { Remove-Item $Partial -Force }
 
@@ -85,6 +130,7 @@ try {
     [PSCustomObject]@{
       built       = (Get-Date -Format o)
       fingerprint = $Fingerprint
+      virtio      = $VirtIOLabel
       files       = @($Files | ForEach-Object { ".postinstall$($_.FullName.Substring($Source.Length))" })
     } | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 -Path $ManifestPath
 

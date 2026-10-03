@@ -32,7 +32,12 @@ param (
   [string] $OutPath,
   [string] $LogDir,
   # opaque string recorded in the output manifest; runner.ps1 uses it to skip unchanged inputs
-  [string] $Fingerprint
+  [string] $Fingerprint,
+  # optional: a virtio-win ISO. The drivers below are added to boot.wim (so Setup
+  # sees virtio disks) and to every image in install.wim (so it boots from them).
+  [string] $VirtIOIsoPath,
+  # comma-separated driver folders from the virtio-win ISO
+  [string] $VirtIODrivers = 'vioscsi,viostor,NetKVM'
 )
 
 # Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
@@ -56,6 +61,10 @@ $StagingIso = Join-Path $WorkingDir 'staging.iso'
 $script:LoadedHives = [System.Collections.Generic.List[string]]::new()
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
 $script:Removed = [System.Collections.Generic.List[string]]::new()
+$script:DriversAdded = [System.Collections.Generic.List[string]]::new()
+$script:VirtIORoot = $null
+$script:VirtIOMountedHere = $false
+$script:VirtIODriverList = @($VirtIODrivers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 # offline hive files, relative to the root of a mounted image.
 # DEFAULTUSER is the template profile copied for new users. The DEFAULT hive in
@@ -305,18 +314,21 @@ function Clear-StaleMounts {
   Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
 }
 
+# Volume of an attached ISO. The drive letter can take a moment to appear after mounting.
+function Get-IsoVolume($DiskImage, [string] $Path) {
+  for ($i = 0; $i -lt 30; $i++) {
+    $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
+    if ($Volume -and $Volume.DriveLetter) { return $Volume }
+    Start-Sleep -Seconds 1
+  }
+  throw "Get-IsoVolume: $Path mounted but no drive letter was assigned."
+}
+
 # Copy the ISO contents to $Destination. Returns the ISO's volume label.
 function Copy-IsoContents([string] $Path, [string] $Destination) {
   $DiskImage = Mount-DiskImage -ImagePath $Path -StorageType ISO -Access ReadOnly -PassThru
   try {
-    # the drive letter can take a moment to appear after mounting
-    $Volume = $null
-    for ($i = 0; $i -lt 30; $i++) {
-      $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
-      if ($Volume -and $Volume.DriveLetter) { break }
-      Start-Sleep -Seconds 1
-    }
-    if (-not ($Volume -and $Volume.DriveLetter)) { throw "Copy-IsoContents: $Path mounted but no drive letter was assigned." }
+    $Volume = Get-IsoVolume $DiskImage $Path
 
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 
@@ -349,17 +361,21 @@ function Set-InstallImage([string] $InstallWim, $Config) {
     $Label = "[$($Image.ImageIndex)] $($Image.ImageName)"
     Write-Host "Set-InstallImage: mounting $Label."
 
-    $ImageVersion = (Get-WindowsImage -ImagePath $InstallWim -Index $Image.ImageIndex).Version
+    $Detail = Get-WindowsImage -ImagePath $InstallWim -Index $Image.ImageIndex
     Mount-Wim -ImageFile $InstallWim -Index $Image.ImageIndex
     $Saved = $false
     try {
-      Set-WinRE -ImageRoot $MountDir -ImageLabel $Label -ImageVersion $ImageVersion
+      Set-WinRE -ImageRoot $MountDir -ImageLabel $Label -ImageVersion $Detail.Version
 
       Write-Host "Set-InstallImage: removing packages from $Label."
       Remove-ImagePackages -ImageRoot $MountDir -PackageConfig $Config.install.Packages -ImageLabel $Label
 
       Write-Host "Set-InstallImage: applying registry settings to $Label."
       Set-ImageRegistry -ImageRoot $MountDir -Groups @(Get-ConfigValue $Config.install 'Registry' @())
+
+      if ($script:VirtIORoot) {
+        Add-VirtIODrivers -ImageRoot $MountDir -OsFolder (Get-VirtIOOsFolder $Detail.Version $Detail.InstallationType) -ImageLabel $Label
+      }
 
       Write-Host "Set-InstallImage: saving $Label."
       Dismount-Wim -Commit
@@ -428,25 +444,71 @@ function Set-WinRE([string] $ImageRoot, [string] $ImageLabel, [version] $ImageVe
   Copy-Item $WinREWimPath $Target -Force
 }
 
-function Set-BootImage([string] $BootWim, $BootConfig) {
+# The virtio-win ISO has one folder per OS: <driver>\<w11|w10|2k25|2k22|2k19>\amd64
+function Get-VirtIOOsFolder([version] $Version, [string] $InstallationType) {
+  if ($InstallationType -like 'Server*') {
+    if ($Version.Build -ge 26100) { return '2k25' }
+    if ($Version.Build -ge 20348) { return '2k22' }
+    return '2k19'
+  }
+  if ($Version.Build -ge 22000) { return 'w11' }
+  'w10'
+}
+
+# Attach the virtio-win ISO (unless it already is) and remember its root
+function Mount-VirtIOIso {
+  $DiskImage = Get-DiskImage -ImagePath $VirtIOIsoPath
+  if (-not $DiskImage.Attached) {
+    $DiskImage = Mount-DiskImage -ImagePath $VirtIOIsoPath -StorageType ISO -Access ReadOnly -PassThru
+    $script:VirtIOMountedHere = $true
+  }
+  $Volume = Get-IsoVolume $DiskImage $VirtIOIsoPath
+  $script:VirtIORoot = "$($Volume.DriveLetter):\"
+  Write-Host "Mount-VirtIOIso: $VirtIOIsoPath ($($Volume.FileSystemLabel)) at $($script:VirtIORoot); adding $($script:VirtIODriverList -join ', ')."
+  $Volume.FileSystemLabel
+}
+
+# Add the configured virtio-win drivers for $OsFolder to a mounted image.
+# A missing driver folder is a warning; a DISM failure (e.g. unsigned driver) fails the build.
+function Add-VirtIODrivers([string] $ImageRoot, [string] $OsFolder, [string] $ImageLabel) {
+  foreach ($Driver in $script:VirtIODriverList) {
+    $Path = Join-Path $script:VirtIORoot "$Driver\$OsFolder\amd64"
+    if (-not (Test-Path $Path)) {
+      Add-BuildWarning "$($ImageLabel): virtio-win has no $Driver\$OsFolder\amd64; driver not added."
+      continue
+    }
+    Write-Host "Add-VirtIODrivers: adding $Driver ($OsFolder) to $ImageLabel."
+    Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path") | Out-Null
+    $script:DriversAdded.Add("$($ImageLabel): $Driver\$OsFolder")
+  }
+}
+
+# $VirtIOOsFolder: add virtio-win drivers for this OS folder (empty: none)
+function Set-BootImage([string] $BootWim, $BootConfig, [string] $VirtIOOsFolder) {
   $LabConfig = Get-ConfigValue $BootConfig 'LabConfig'
   $Values = @(if ($LabConfig) { $LabConfig.PSObject.Properties | Where-Object { $_.Value } })
-  if (-not $Values) { Write-Host 'Set-BootImage: no LabConfig bypasses enabled; leaving boot.wim alone.'; return }
+  if (-not $Values -and -not $VirtIOOsFolder) { Write-Host 'Set-BootImage: no LabConfig bypasses or drivers to add; leaving boot.wim alone.'; return }
 
   $Index = Get-SetupBootIndex $BootWim
-  Write-Host "Set-BootImage: mounting boot.wim index $Index to set LabConfig ($($Values.Name -join ', '))."
+  Write-Host "Set-BootImage: mounting boot.wim index $Index (LabConfig: $($Values.Name -join ', '); drivers: $VirtIOOsFolder)."
 
-  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
+  # adding drivers needs a full mount; a registry edit alone doesn't
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize:(-not $VirtIOOsFolder)
   $Saved = $false
   try {
-    $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
-    try {
-      foreach ($Value in $Values) {
-        Invoke-Native reg.exe @('add', "$Hive\Setup\LabConfig", '/v', $Value.Name, '/t', 'REG_DWORD', '/d', '1', '/f') | Out-Null
+    if ($Values) {
+      $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
+      try {
+        foreach ($Value in $Values) {
+          Invoke-Native reg.exe @('add', "$Hive\Setup\LabConfig", '/v', $Value.Name, '/t', 'REG_DWORD', '/d', '1', '/f') | Out-Null
+        }
+      }
+      finally {
+        Dismount-OfflineHive $Hive
       }
     }
-    finally {
-      Dismount-OfflineHive $Hive
+    if ($VirtIOOsFolder) {
+      Add-VirtIODrivers -ImageRoot $MountDir -OsFolder $VirtIOOsFolder -ImageLabel "boot.wim[$Index]"
     }
     Dismount-Wim -Commit
     $Saved = $true
@@ -534,13 +596,7 @@ function New-IsoImage([string] $Source, [string] $OutputFile, [string] $Label, [
 function Test-IsoImage([string] $Path, [int] $ExpectedImageCount) {
   $DiskImage = Mount-DiskImage -ImagePath $Path -StorageType ISO -Access ReadOnly -PassThru
   try {
-    $Volume = $null
-    for ($i = 0; $i -lt 30; $i++) {
-      $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
-      if ($Volume -and $Volume.DriveLetter) { break }
-      Start-Sleep -Seconds 1
-    }
-    if (-not ($Volume -and $Volume.DriveLetter)) { throw "Test-IsoImage: $Path mounted but no drive letter was assigned." }
+    $Volume = Get-IsoVolume $DiskImage $Path
 
     $Root = "$($Volume.DriveLetter):\"
     foreach ($Required in 'sources\boot.wim', 'autounattend.xml', 'bootmgr', 'efi\boot\bootx64.efi') {
@@ -584,6 +640,7 @@ try {
   $Config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
   if (-not (Test-Path $Autounattend)) { throw "Autounattend file not found: $Autounattend" }
   if ($WinREWimPath -and -not (Test-Path $WinREWimPath)) { throw "WinRE file not found: $WinREWimPath" }
+  if ($VirtIOIsoPath -and -not (Test-Path $VirtIOIsoPath)) { throw "virtio-win ISO not found: $VirtIOIsoPath" }
 
   # DISM logs and scratch space live with the build, not on C:
   New-Item -ItemType Directory -Force -Path $WorkingDir, $MountDir, $DismScratch | Out-Null
@@ -621,6 +678,15 @@ try {
 
   $ImageCount = @(Get-WindowsImage -ImagePath $InstallWim).Count
 
+  # boot.wim gets the drivers for the OS on this media (from the first image)
+  $VirtIOLabel = $null
+  $BootVirtIOFolder = $null
+  if ($VirtIOIsoPath) {
+    $VirtIOLabel = Mount-VirtIOIso
+    $First = Get-WindowsImage -ImagePath $InstallWim -Index 1
+    $BootVirtIOFolder = Get-VirtIOOsFolder $First.Version $First.InstallationType
+  }
+
   Write-Host 'Customize-Iso: adding autounattend.xml and post-install stubs.'
   Set-Unattend -Source $Autounattend -MediaRoot $ScratchPath -ImageCount $ImageCount
   $OemPath = Join-Path $ScratchPath 'sources\$OEM$\$1'
@@ -632,7 +698,7 @@ try {
   $InstallImage = @(Set-InstallImage -InstallWim $InstallWim -Config $Config)[-1]
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
-  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot')
+  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -VirtIOOsFolder $BootVirtIOFolder
 
   Write-Host 'Customize-Iso: building ISO.'
   New-IsoImage -Source $ScratchPath -OutputFile $StagingIso -Label $VolumeLabel `
@@ -664,6 +730,8 @@ try {
     format      = [System.IO.Path]::GetExtension($InstallImage).TrimStart('.')
     images      = @($Images)
     removed     = @($script:Removed)
+    virtio      = $VirtIOLabel
+    drivers     = @($script:DriversAdded)
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
   } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $ManifestPath
@@ -693,6 +761,9 @@ finally {
       }
     }
     catch { Write-Warning "cleanup: $_" }
+  }
+  if ($script:VirtIOMountedHere) {
+    try { Dismount-DiskImage -ImagePath $VirtIOIsoPath | Out-Null } catch { Write-Warning "cleanup: $_" }
   }
   Stop-Transcript | Out-Null
 }
