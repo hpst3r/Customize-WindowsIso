@@ -141,7 +141,7 @@ with the same config, unattend, stubs, and script. Pass `-Force` to rebuild ever
 Exit code is non-zero if any ISO failed, so Task Scheduler's *Last Run Result* shows it.
 
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
-`stub.ps1` and then `runner.ps1`:
+`stub.ps1`, then `runner.ps1`, then `Send-BuildNotification.ps1` (see Notifications):
 
 ```PowerShell
 .\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso
@@ -157,3 +157,43 @@ Each run also writes a machine-readable summary to `LogDirectory\last-run-runner
 per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`), minutes,
 warnings, and the source build, image versions and editions from the manifests.
 Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
+
+## Notifications
+
+The task's last action, `Send-BuildNotification.ps1`, reads both run summaries and sends one
+message, e.g. *Windows images: OK (2 rebuilt)*, *Windows images: FAILED (1 failed)* or
+*Windows images: ACTION NEEDED (3 stale)*, listing what was rebuilt, new Windows builds,
+failures, durations and warning counts. A summary that is missing or older than
+`MaxSummaryAgeHours` (default 24) counts as a failure, since that stage didn't finish.
+
+Setup (on the build machine, elevated):
+
+1. Copy `notify.example.json` to `notify.json` (it's gitignored) and edit it. Each channel is
+   optional (`Enabled`) and has `Send`: `Always` or `OnlyOnFailure` (anything but OK, so it
+   includes *ACTION NEEDED*).
+   - `Ntfy`: `Server` (default `https://ntfy.sh`) and `Topic`. On the public server anyone who
+     knows the topic can read it, so use a long random name. The message has priority 4 on
+     failure, 3 when something was rebuilt, and 2 when nothing changed.
+   - `Email`: an authenticated SMTP relay (Microsoft 365 `smtp.office365.com`, Amazon SES,
+     etc.): `SmtpServer`, `Port` (587), `Security` (`StartTls`, or `None` for a trusted
+     relay without TLS), `From`, `To` (list), `Username`. `System.Net.Mail` can't do TLS on
+     connect (port 465), so use 587 with STARTTLS. Microsoft 365 needs SMTP AUTH enabled
+     for the sending mailbox.
+   - `Link`: optional URL opened when the ntfy notification is tapped (e.g. the index page).
+2. Store secrets with `Set-NotificationSecret.ps1`; it prompts for the value and never prints it:
+
+   ```PowerShell
+   .\Set-NotificationSecret.ps1 -Name SmtpPassword
+   .\Set-NotificationSecret.ps1 -Name NtfyToken      # only for a protected ntfy topic
+   ```
+
+   They are encrypted with DPAPI in *LocalMachine* scope into `notify.secrets.json`
+   (gitignored, readable only by SYSTEM and Administrators): the SYSTEM task can decrypt
+   them, but a copy of the file is useless on another machine. Re-run it to change a secret,
+   or pass `-Remove`.
+3. Test: `.\Send-BuildNotification.ps1 -Test` sends on every enabled channel (ignoring
+   `OnlyOnFailure`); `-DryRun` only prints the message. Run `register-task.ps1` again to add
+   the notification action to an existing task (`-NoNotification` leaves it out).
+
+A channel that fails is logged as a warning (`notify-<timestamp>.log` in `LogDirectory`); the
+step exits non-zero only if every channel that tried to send failed.
