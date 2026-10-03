@@ -151,3 +151,9 @@ Logs are in `LogDirectory` (default `Y:\IsoBuild\Logs`). Each ISO has its own
 `Customize-<name>-<timestamp>.log`, and DISM's log is in the working directory.
 A failed build leaves its working directory in place for troubleshooting.
 The next run cleans it up, including any stale mounts.
+
+Each run also writes a machine-readable summary to `LogDirectory\last-run-runner.json` (and a
+`runner-<timestamp>.json` copy beside the transcript): start/end time, exit code, log file, and
+per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`), minutes,
+warnings, and the source build, image versions and editions from the manifests.
+Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.

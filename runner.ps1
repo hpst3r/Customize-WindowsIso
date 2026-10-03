@@ -14,6 +14,9 @@ the same input ISO with the same config, unattend, stubs, and script. Use
 -Force to rebuild everything.
 
 Exit code is 0 if every ISO succeeded or was skipped, 1 otherwise.
+
+Every run writes a machine-readable summary to <LogDirectory>\last-run-runner.json
+(and runner-<timestamp>.json beside the transcript) for Send-BuildNotification.ps1.
 #>
 param (
   [string] $ConfigFile = (Join-Path $PSScriptRoot 'runner-config.json'),
@@ -77,13 +80,80 @@ function Test-FileLocked([string] $Path) {
   try { [System.IO.File]::Open($Path, 'Open', 'Read', 'Read').Dispose(); $false } catch { $true }
 }
 
+#region run summary
+
+# Parsed JSON file, or $null if it is missing or unreadable
+function Read-JsonFile([string] $Path) {
+  if (-not (Test-Path $Path)) { return $null }
+  try { Get-Content -Raw $Path | ConvertFrom-Json } catch { Write-Warning "runner: could not read $($Path): $_"; $null }
+}
+
+# One summary item per result row, with build details from the output manifest
+# (what is published now) and the source ISO's .iso.json from Get-WindowsIso
+function ConvertTo-SummaryItem($Row) {
+  $Result = switch -Wildcard ($Row.Status) {
+    'OK*' { 'Built' }
+    'Failed*' { 'Failed' }
+    'Stale*' { 'Stale' }
+    default { $Row.Status }   # UpToDate, Locked, Built
+  }
+  $Manifest = Read-JsonFile (Join-Path $Config.OutputDirectory "$($Row.Iso).json")
+  $Source = Read-JsonFile (Join-Path $Config.InputDirectory "$($Row.Iso).json")
+  $Images = @(Get-ConfigValue $Manifest 'images' @())
+  $Warnings = @(Get-ConfigValue $Manifest 'warnings' @())
+  [PSCustomObject]@{
+    name            = $Row.Iso
+    status          = $Row.Status
+    # Built | UpToDate | Failed | Locked | Stale
+    result          = $Result
+    minutes         = $Row.Minutes
+    # warnings of the build that is published now (this run's, if it was rebuilt)
+    warnings        = $Warnings.Count
+    warningMessages = @($Warnings)
+    sourceVersion   = Get-ConfigValue $Source 'name'
+    sourceBuild     = Get-ConfigValue $Source 'build'
+    imageVersions   = @($Images | ForEach-Object { Get-ConfigValue $_ 'Version' } | Where-Object { $_ } | Sort-Object -Unique)
+    editions        = @($Images | ForEach-Object { Get-ConfigValue $_ 'Name' })
+    built           = Get-ConfigValue $Manifest 'built'
+  }
+}
+
+# UTF-8 without BOM; last-run-runner.json is replaced in one step so readers never see half a file
+function Write-RunSummary {
+  $Ended = Get-Date
+  $Summary = [PSCustomObject]@{
+    stage    = 'runner'
+    version  = $(try { git -c safe.directory='*' -C $PSScriptRoot rev-parse --short HEAD 2>$null } catch { $null })
+    computer = $env:COMPUTERNAME
+    started  = $Started.ToString('o')
+    ended    = $Ended.ToString('o')
+    minutes  = [math]::Round(($Ended - $Started).TotalMinutes, 1)
+    exitCode = $ExitCode
+    error    = $RunError
+    logFile  = $TranscriptPath
+    items    = @($Results | ForEach-Object { ConvertTo-SummaryItem $_ })
+  }
+  $Json = $Summary | ConvertTo-Json -Depth 6
+  $Utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText((Join-Path $LogDir "runner-$Stamp.json"), $Json, $Utf8)
+  $Latest = Join-Path $LogDir 'last-run-runner.json'
+  [System.IO.File]::WriteAllText("$Latest.tmp", $Json, $Utf8)
+  Move-Item "$Latest.tmp" $Latest -Force
+}
+
+#endregion
+
+$Started = Get-Date
+$Stamp = $Started.ToString('yyyyMMdd-HHmmss')
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-Start-Transcript -Path (Join-Path $LogDir "runner-$(Get-Date -Format yyyyMMdd-HHmmss).log") | Out-Null
+$TranscriptPath = Join-Path $LogDir "runner-$Stamp.log"
+Start-Transcript -Path $TranscriptPath | Out-Null
 
 # only one runner at a time - a long build must not collide with next week's
 $Mutex = New-Object System.Threading.Mutex($false, 'Global\Customize-WindowsIso-Runner')
 $Results = [System.Collections.Generic.List[object]]::new()
 $ExitCode = 1
+$RunError = $null
 
 try {
   # an abandoned mutex (previous runner was killed) is still acquired
@@ -160,8 +230,12 @@ try {
 
   # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM
   if (Get-ConfigValue $Config 'BuildPostinstallIso' $true) {
-    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath (Join-Path $Config.OutputDirectory 'postinstall.iso') -VirtIOIsoPath $VirtIOIso
-    $Status = if ($LASTEXITCODE -eq 0) { 'OK' } else { "Failed (exit $LASTEXITCODE)" }
+    $PostinstallPath = Join-Path $Config.OutputDirectory 'postinstall.iso'
+    $BuiltBefore = Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built'
+    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath $PostinstallPath -VirtIOIsoPath $VirtIOIso
+    $Status = if ($LASTEXITCODE -ne 0) { "Failed (exit $LASTEXITCODE)" }
+    elseif ((Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built') -eq $BuiltBefore) { 'UpToDate' }
+    else { 'Built' }
     $Results.Add([PSCustomObject]@{ Iso = 'postinstall.iso'; Status = $Status; Minutes = 0 })
   }
 
@@ -169,14 +243,17 @@ try {
   $ExitCode = if ($Failed) { 1 } else { 0 }
 }
 catch {
+  $RunError = "$_"
   Write-Host "runner: FAILED: $_"
 }
 finally {
   Write-Host 'runner: summary:'
   $Results | Format-Table -AutoSize | Out-String | Write-Host
 
-  # prune old logs
-  Get-ChildItem $LogDir -Filter '*.log' -File |
+  try { Write-RunSummary } catch { Write-Warning "runner: could not write the run summary: $_" }
+
+  # prune old logs and run summaries (last-run-*.json is kept)
+  Get-ChildItem $LogDir -File | Where-Object { $_.Name -like '*.log' -or $_.Name -match '-\d{8}-\d{6}\.json$' } |
     Where-Object LastWriteTime -lt (Get-Date).AddDays(-$LogRetentionDays) |
     Remove-Item -Force -ErrorAction Continue
 
