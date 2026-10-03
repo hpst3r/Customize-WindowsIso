@@ -16,6 +16,7 @@
   "install": {
     "Format": "wim",
     "ExportWim": true,
+    "DefenderUpdate": true,
     "Packages": {
       "AppXPackagesToRemove": [
         "Clipchamp.Clipchamp",
