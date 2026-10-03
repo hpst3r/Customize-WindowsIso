@@ -37,7 +37,11 @@ param (
   # sees virtio disks) and to every image in install.wim (so it boots from them).
   [string] $VirtIOIsoPath,
   # comma-separated driver folders from the virtio-win ISO
-  [string] $VirtIODrivers = 'vioscsi,viostor,NetKVM'
+  [string] $VirtIODrivers = 'vioscsi,viostor,NetKVM',
+  # optional: defender-dism-<arch>.cab from Microsoft's "Defender update for Windows
+  # operating system installation images" kit (or the folder holding it). Applied to
+  # every image in install.wim unless config.json has install.DefenderUpdate = false.
+  [string] $DefenderPackage
 )
 
 # Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
@@ -65,6 +69,10 @@ $script:DriversAdded = [System.Collections.Generic.List[string]]::new()
 $script:VirtIORoot = $null
 $script:VirtIOMountedHere = $false
 $script:VirtIODriverList = @($VirtIODrivers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+# expanded Defender package (if any), the manifest's "defender" entry, and per-image results
+$script:Defender = $null
+$script:DefenderSummary = $null
+$script:DefenderImages = [System.Collections.Generic.List[object]]::new()
 
 # offline hive files, relative to the root of a mounted image.
 # DEFAULTUSER is the template profile copied for new users. The DEFAULT hive in
@@ -377,6 +385,8 @@ function Set-InstallImage([string] $InstallWim, $Config) {
         Add-VirtIODrivers -ImageRoot $MountDir -OsFolder (Get-VirtIOOsFolder $Detail.Version $Detail.InstallationType) -ImageLabel $Label
       }
 
+      if ($script:Defender) { Add-DefenderUpdate -ImageRoot $MountDir -Image $Detail -ImageLabel $Label }
+
       Write-Host "Set-InstallImage: saving $Label."
       Dismount-Wim -Commit
       $Saved = $true
@@ -482,6 +492,157 @@ function Add-VirtIODrivers([string] $ImageRoot, [string] $OsFolder, [string] $Im
     $script:DriversAdded.Add("$($ImageLabel): $Driver\$OsFolder")
   }
 }
+
+#region defender
+
+# Microsoft's "Defender update for Windows operating system installation images"
+# kit is defender-dism-<arch>.cab plus DefenderUpdateWinImage.ps1. The script
+# mounts the WIM itself with the DISM cmdlets (in-process, see Find-Dism), but
+# inside the image all it does is copy the cab's Platform and Definition
+# Updates folders into ProgramData\Microsoft\Windows Defender, drop
+# package-defender.xml into Windows\Temp, and enable Windows-Defender on Server.
+# The same is done here to the image that is already mounted.
+
+# true if $Path has a valid Authenticode signature from Microsoft, chaining to a Microsoft root
+function Test-MicrosoftSignature([string] $Path) {
+  $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+  if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') { return $false }
+  $Chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+  $Chain.ChainPolicy.RevocationMode = 'NoCheck'
+  try {
+    $Chain.Build($Signature.SignerCertificate) | Out-Null
+    $Root = $Chain.ChainElements[$Chain.ChainElements.Count - 1].Certificate
+    $Root.Subject -match '^CN=Microsoft Root Certificate Authority'
+  }
+  finally { $Chain.Dispose() }
+}
+
+# Verify and expand the package. Returns what it contains, or $null (with a warning) if it can't be used.
+function Initialize-DefenderUpdate([string] $Path) {
+  $script:DefenderSummary = [ordered]@{ package = $null; platform = $null; engine = $null; signatures = $null; source = $Path; images = $script:DefenderImages }
+  if (-not $Path) {
+    Add-BuildWarning 'install.DefenderUpdate is on but no -DefenderPackage was given; images keep the Defender platform and definitions from the media.'
+    return
+  }
+  try {
+    $Cab = $Path
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+      $Cab = @(Get-ChildItem -LiteralPath $Path -Filter 'defender-dism-*.cab' -File | ForEach-Object FullName) | Select-Object -First 1
+      if (-not $Cab) { throw "no defender-dism-*.cab in $Path." }
+    }
+    if (-not (Test-Path -LiteralPath $Cab -PathType Leaf)) { throw "$Cab not found." }
+    if (-not (Test-MicrosoftSignature $Cab)) { throw "$Cab is not validly signed by Microsoft." }
+
+    $Root = Join-Path $WorkingDir 'DefenderPackage'
+    if (Test-Path $Root) { Remove-Item $Root -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    Invoke-Native expand.exe @($Cab, '-F:*', $Root) | Out-Null
+
+    [xml] $Xml = Get-Content -Raw -LiteralPath (Join-Path $Root 'package-defender.xml')
+    $Platform = @(Get-ChildItem (Join-Path $Root 'Platform') -Directory)
+    if ($Platform.Count -ne 1 -or -not (Test-Path (Join-Path $Root 'Definition Updates\Updates\mpengine.dll'))) { throw "unexpected layout in $Cab." }
+
+    $Package = [PSCustomObject]@{
+      Root       = $Root
+      Arch       = "$($Xml.packageinfo.arch)"
+      Package    = "$($Xml.packageinfo.versions.defender)"
+      Platform   = "$($Xml.packageinfo.versions.platform)"
+      Engine     = "$($Xml.packageinfo.versions.engine)"
+      Signatures = "$($Xml.packageinfo.versions.signatures)"
+    }
+    foreach ($Name in 'package', 'platform', 'engine', 'signatures') { $script:DefenderSummary[$Name] = $Package.$Name }
+    Write-Host "Initialize-DefenderUpdate: $Cab is package $($Package.Package) ($($Package.Arch)): platform $($Package.Platform), engine $($Package.Engine), security intelligence $($Package.Signatures)."
+    $Package
+  }
+  catch {
+    Add-BuildWarning "Defender update package $Path can't be used, images keep the Defender version from the media: $_"
+  }
+}
+
+# highest file version among the files that exist, as a string ($null if none)
+function Get-MaxFileVersion([string[]] $Paths) {
+  $Versions = @(foreach ($Path in $Paths) {
+      if (Test-Path -LiteralPath $Path) {
+        $Info = (Get-Item -LiteralPath $Path).VersionInfo
+        [version] ('{0}.{1}.{2}.{3}' -f $Info.FileMajorPart, $Info.FileMinorPart, $Info.FileBuildPart, $Info.FilePrivatePart)
+      }
+    })
+  if ($Versions) { "$(@($Versions | Sort-Object)[-1])" }
+}
+
+# Defender versions an image will start with: the newest platform (inbox or under
+# ProgramData\...\Platform), engine and security intelligence (Default = inbox, Updates = kit)
+function Get-ImageDefenderVersion([string] $ImageRoot) {
+  $Data = Join-Path $ImageRoot 'ProgramData\Microsoft\Windows Defender'
+  $Definitions = @('Default', 'Updates' | ForEach-Object { Join-Path $Data "Definition Updates\$_" })
+  [PSCustomObject]@{
+    platform   = Get-MaxFileVersion (@(Join-Path $ImageRoot 'Program Files\Windows Defender\MsMpEng.exe') +
+      @(Get-ChildItem (Join-Path $Data 'Platform') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'MsMpEng.exe' }))
+    engine     = Get-MaxFileVersion @($Definitions | ForEach-Object { Join-Path $_ 'mpengine.dll' })
+    signatures = Get-MaxFileVersion @($Definitions | ForEach-Object { Join-Path $_ 'mpavdlta.vdm' })
+  }
+}
+
+# Apply the Defender package to a mounted image. Images the kit doesn't support
+# are skipped with a warning; a failure while copying fails the build, so a
+# half-copied platform folder is never committed.
+function Add-DefenderUpdate([string] $ImageRoot, $Image, [string] $ImageLabel) {
+  $Package = $script:Defender
+  $Before = Get-ImageDefenderVersion $ImageRoot
+  $Result = [ordered]@{ image = $ImageLabel; status = 'skipped'; before = $Before; after = $null }
+  $script:DefenderImages.Add($Result)
+
+  # the kit's own checks: matching architecture, Windows 10 1607 (with the September 2018 update) or later
+  $Arch = switch ([int] $Image.Architecture) { 0 { 'x86' } 9 { 'amd64' } 12 { 'arm64' } default { "unknown ($_)" } }
+  $Version = [version] $Image.Version
+  $MinimumRevision = @{ 14393 = 2515; 15063 = 1356; 16299 = 699; 17134 = 320 }
+  $Supported = $Version.Major -gt 10 -or ($Version.Major -eq 10 -and ($Version.Minor -gt 0 -or $Version.Build -ge 17763 -or
+      ($MinimumRevision.ContainsKey($Version.Build) -and $Version.Revision -ge $MinimumRevision[$Version.Build])))
+  if ($Package.Arch -notlike "$Arch*") { Add-BuildWarning "$($ImageLabel): Defender package is $($Package.Arch), image is $Arch; Defender not updated."; return }
+  if (-not $Supported) { Add-BuildWarning "$($ImageLabel): Defender update kit doesn't support Windows $Version; Defender not updated."; return }
+
+  $Wanted = [PSCustomObject]@{ platform = $Package.Platform; engine = $Package.Engine; signatures = $Package.Signatures }
+  if (-not @('platform', 'engine', 'signatures' | Where-Object { -not $Before.$_ -or [version] $Before.$_ -lt [version] $Wanted.$_ })) {
+    Write-Host "Add-DefenderUpdate: $ImageLabel already has Defender $($Package.Package) or newer; nothing to do."
+    $Result.status = 'current'
+    $Result.after = $Before
+    return
+  }
+
+  # Server: Defender is an optional feature; the kit enables it if it is off
+  if ($Image.InstallationType -like 'Server*') {
+    $Feature = Invoke-Dism @("/Image:$ImageRoot", '/Get-FeatureInfo', '/FeatureName:Windows-Defender') -AllowFailure
+    $State = @($Feature.Output | Where-Object { $_ -match '^\s*State\s*:\s*(\S+)' } | ForEach-Object { $Matches[1] })
+    if ($Feature.ExitCode -ne 0 -or -not $State) { Add-BuildWarning "$($ImageLabel): no Windows-Defender feature in this image; Defender not updated."; return }
+    if ($State[0] -ne 'Enabled') {
+      Write-Host "Add-DefenderUpdate: enabling Windows-Defender in $ImageLabel (was $($State[0]))."
+      $Enable = Invoke-Dism @("/Image:$ImageRoot", '/Enable-Feature', '/FeatureName:Windows-Defender') -AllowFailure
+      if ($Enable.ExitCode -notin 0, 3010) { Add-BuildWarning "$($ImageLabel): enabling Windows-Defender failed (exit $($Enable.ExitCode)); Defender not updated."; return }
+    }
+  }
+
+  Write-Host "Add-DefenderUpdate: updating Defender in $ImageLabel from platform $($Before.platform), engine $($Before.engine), security intelligence $($Before.signatures)."
+  $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $Data = Join-Path $ImageRoot 'ProgramData\Microsoft\Windows Defender'
+  # new files inherit Defender's ACLs from the destination folders, as with the kit's Copy-Item
+  foreach ($Folder in 'Definition Updates\Updates', 'Platform') {
+    Invoke-Native robocopy.exe @((Join-Path $Package.Root $Folder), (Join-Path $Data $Folder), '/E', '/R:3', '/W:5', '/NP', '/NFL', '/NDL') -SuccessExitCodes (0..7) | Out-Null
+  }
+  Copy-Item (Join-Path $Package.Root 'package-defender.xml') (Join-Path $ImageRoot 'Windows\Temp') -Force
+
+  # check what landed rather than trusting the copy
+  $After = Get-ImageDefenderVersion $ImageRoot
+  $Result.after = $After
+  foreach ($Name in 'platform', 'engine', 'signatures') {
+    if (-not $After.$Name -or [version] $After.$Name -lt [version] $Wanted.$Name) {
+      throw "Add-DefenderUpdate: $ImageLabel has $Name $($After.$Name) after the update, expected $($Wanted.$Name)."
+    }
+  }
+  $Result.status = 'updated'
+  Write-Host "Add-DefenderUpdate: $ImageLabel now has platform $($After.platform), engine $($After.engine), security intelligence $($After.signatures) ($([math]::Round($Stopwatch.Elapsed.TotalSeconds)) s)."
+}
+
+#endregion
 
 # $VirtIOOsFolder: add virtio-win drivers for this OS folder (empty: none)
 function Set-BootImage([string] $BootWim, $BootConfig, [string] $VirtIOOsFolder) {
@@ -693,9 +854,13 @@ try {
   New-Item -ItemType Directory -Force -Path $OemPath | Out-Null
   Copy-Item (Join-Path $PSScriptRoot 'stub-scripts\*') $OemPath -Recurse -Force
 
+  # Defender update for every image: best effort, so a missing or bad package is a warning
+  if (Get-ConfigValue $Config.install 'DefenderUpdate' $true) { $script:Defender = Initialize-DefenderUpdate $DefenderPackage }
+
   Write-Host 'Customize-Iso: customizing install.wim.'
   # returns the final install image path (install.wim or install.esd)
   $InstallImage = @(Set-InstallImage -InstallWim $InstallWim -Config $Config)[-1]
+  if ($script:Defender) { Remove-Item $script:Defender.Root -Recurse -Force }
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
   Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -VirtIOOsFolder $BootVirtIOFolder
@@ -732,6 +897,7 @@ try {
     removed     = @($script:Removed)
     virtio      = $VirtIOLabel
     drivers     = @($script:DriversAdded)
+    defender    = $script:DefenderSummary
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
   } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $ManifestPath

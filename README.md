@@ -30,7 +30,8 @@ It is designed to run weekly after [Get-WindowsIso](https://github.com/hpst3r/Ge
   -OutPath 'Y:\Images\Customized\WindowsServer2025.iso'
 ```
 
-Optional parameters: `-ConfigFile`, `-Autounattend`, `-LogDir`, and `-WinREWimPath`.
+Optional parameters: `-ConfigFile`, `-Autounattend`, `-LogDir`, `-WinREWimPath`, and
+`-DefenderPackage` (see [Microsoft Defender update](#microsoft-defender-update)).
 `-WinREWimPath` is only used for images that have no WinRE of their own. Get-WindowsIso
 builds keep a WinRE that matches the build, so it is normally not needed.
 
@@ -38,7 +39,7 @@ Outputs, written only after the ISO has been built and verified:
 
 - `<name>.iso`
 - `<name>.iso.sha256.txt`
-- `<name>.iso.json`: images, removed packages, warnings, build time, and the fingerprint used by the runner
+- `<name>.iso.json`: images, removed packages, Defender versions, warnings, build time, and the fingerprint used by the runner
 
 If an image has several editions (e.g. the four Windows Server editions), the
 `/IMAGE/INDEX` selection is removed from the unattend so Setup asks which edition to
@@ -61,6 +62,7 @@ install. With a single edition, Setup installs it without asking.
   smaller (and fits FAT32 USB media more easily) but takes much longer to build. Setup uses
   `install.esd` automatically. The ESD can't be mounted for servicing; export it to a WIM first.
 - `install.ExportWim`: with `wim`, re-export `install.wim` after servicing to drop orphaned data (smaller ISO)
+- `install.DefenderUpdate`: apply Microsoft's Defender update to every image (default `true`; see below)
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
 
@@ -133,11 +135,56 @@ images without the drivers. Clear `VirtIO.IsoPath` to turn this off.
 The drivers are not added to WinRE inside the images, so the recovery environment won't see a
 virtio-scsi disk.
 
+## Microsoft Defender update
+
+New installs would otherwise start with the Defender platform, engine, and security intelligence
+that shipped on the media. Every image in `install.wim` (client and Server, including Server Core)
+gets Microsoft's
+[Defender update for Windows operating system installation images](https://support.microsoft.com/servicing/Management-Tools/microsoft-defender/update/microsoft-defender-update-for-windows-operating-system-installation-images)
+(see also [Updates for DISM](https://learn.microsoft.com/defender-endpoint/microsoft-defender-antivirus-updates#updates-for-deployment-image-servicing-and-management-dism)).
+Set `install.DefenderUpdate` to `false` in `config.json` to turn it off.
+
+- **Download.** Once per run, the runner checks the kit at `Defender.Url` (x64:
+  `https://go.microsoft.com/fwlink/?linkid=2144531`). The fwlink redirects to a URL that includes the
+  package version, so a `HEAD` request (redirect URL, ETag, Last-Modified, size) tells whether it
+  changed without downloading the ~250 MB zip. A changed kit is downloaded and extracted to
+  `Defender.CacheDirectory` (default `Y:\IsoBuild\Cache\defender\current`). It replaces the cached kit only if
+  `defender-dism-x64.cab` and `DefenderUpdateWinImage.ps1` both have valid Authenticode
+  signatures from Microsoft that chain to a Microsoft root.
+- **Best effort.** If the download fails, the cached kit is used, with a warning. If there is
+  no usable kit, images are built without the update and the manifest gets a warning.
+- **Applying.** The kit's `DefenderUpdateWinImage.ps1` mounts the WIM itself with the DISM
+  cmdlets, which this project avoids (see `Find-Dism`). Inside the image, all the script does is copy the
+  cab's `Platform` and `Definition Updates\Updates` folders into
+  `ProgramData\Microsoft\Windows Defender`, put `package-defender.xml` in `Windows\Temp`, and
+  enable the `Windows-Defender` feature on Server if it is off. `Customize-Iso.ps1 -DefenderPackage <cab>`
+  does the same to the already-mounted image (`Add-DefenderUpdate`), after re-checking the cab's
+  signature. Defender switches to the newer platform and definitions when the installed OS first starts.
+- **Support.** The kit's own checks are applied: matching architecture, and Windows 10 1607
+  (with the September 2018 update) or later. That covers Windows 10/11, Insider builds, and
+  Windows Server 2016 and later. Images that fail these checks are skipped with a warning. An
+  image that already has these versions or newer is left alone.
+- **Verification.** After copying, the versions are read back from the files in the image
+  (newest `MsMpEng.exe`, `mpengine.dll`, `mpavdlta.vdm`), and a mismatch fails the build. The
+  manifest's `defender` entry records the package, platform, engine, and security intelligence
+  versions, plus each image's versions before and after.
+- **Cost.** The cab is expanded once per ISO (~330 MB), and each image gets ~330 MB of extra
+  copying. The files are identical in every edition, so the WIM stores them only once.
+
+**Rebuilds.** The kit's platform and engine versions are part of the runner fingerprint, so a
+new monthly platform/engine release rebuilds every ISO once. Microsoft also publishes
+security-intelligence-only refreshes of the kit, sometimes several a month, and these don't trigger a
+rebuild. An ISO built for another reason gets whatever kit is current, and Defender
+downloads current security intelligence within minutes of going online anyway. Set
+`Defender.RebuildOnSignatureUpdate` to `true` to rebuild on every new kit.
+
 ## Weekly runs
 
 `runner.ps1` customizes every ISO in `InputDirectory` (see `runner-config.json`) one at a
 time. It skips an ISO when the output already exists and was built from the same input
-with the same config, unattend, stubs, and script. Pass `-Force` to rebuild everything.
+with the same config, unattend, stubs, script, virtio-win ISO, and Defender platform/engine
+version. Pass `-Force` to rebuild everything. `runner-config.json`'s `Defender` section sets the
+kit URL (`Url`), the cache directory (`CacheDirectory`), and `RebuildOnSignatureUpdate`.
 Exit code is non-zero if any ISO failed, so Task Scheduler's *Last Run Result* shows it.
 
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's

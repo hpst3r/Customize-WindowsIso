@@ -9,5 +9,10 @@
     "IsoPath": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
     "Drivers": ["vioscsi", "viostor", "NetKVM"]
   },
+  "Defender": {
+    "Url": "https://go.microsoft.com/fwlink/?linkid=2144531",
+    "CacheDirectory": "Y:\\IsoBuild\\Cache\\defender",
+    "RebuildOnSignatureUpdate": false
+  },
   "LogRetentionDays": 90
 }

@@ -42,6 +42,14 @@ $VirtIO = Get-ConfigValue $Config 'VirtIO'
 $VirtIOIso = Get-ConfigValue $VirtIO 'IsoPath' ''
 $VirtIODrivers = @(Get-ConfigValue $VirtIO 'Drivers' @('vioscsi', 'viostor', 'NetKVM')) -join ','
 
+# Microsoft Defender update kit for installation images, refreshed once per run
+# and applied to every image unless config.json has install.DefenderUpdate = false
+$DefenderConfig = Get-ConfigValue $Config 'Defender'
+$DefenderEnabled = [bool] (Get-ConfigValue (Get-ConfigValue (Get-Content -Raw $CustomizeConfig | ConvertFrom-Json) 'install') 'DefenderUpdate' $true)
+$DefenderUrl = Get-ConfigValue $DefenderConfig 'Url' 'https://go.microsoft.com/fwlink/?linkid=2144531'
+$DefenderCache = Get-ConfigValue $DefenderConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\defender')
+$DefenderRebuildOnSignatures = [bool] (Get-ConfigValue $DefenderConfig 'RebuildOnSignatureUpdate' $false)
+
 # Identify everything that affects the output. If none of it has changed since
 # the last successful build, rebuilding would produce the same ISO.
 function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
@@ -66,6 +74,14 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
     $Item = Get-Item $VirtIOIso
     $Hashes += "virtio:$($Item.Length):$($Item.LastWriteTimeUtc.Ticks):$VirtIODrivers"
   }
+  # a Defender kit with a new platform or engine (monthly) rebuilds everything;
+  # signature-only kit refreshes don't, unless Defender.RebuildOnSignatureUpdate
+  if ($DefenderEnabled) {
+    $Defender = 'defender:none'
+    if ($DefenderKit) { $Defender = "defender:$($DefenderKit.Platform):$($DefenderKit.Engine)" }
+    if ($DefenderKit -and $DefenderRebuildOnSignatures) { $Defender += ":$($DefenderKit.Signatures)" }
+    $Hashes += $Defender
+  }
 
   $Bytes = [System.Text.Encoding]::UTF8.GetBytes((@($Source) + $Hashes) -join '|')
   $Sha = [System.Security.Cryptography.SHA256]::Create()
@@ -76,6 +92,124 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
 function Test-FileLocked([string] $Path) {
   try { [System.IO.File]::Open($Path, 'Open', 'Read', 'Read').Dispose(); $false } catch { $true }
 }
+
+#region defender
+
+# true if $Path has a valid Authenticode signature from Microsoft, chaining to a Microsoft root
+function Test-MicrosoftSignature([string] $Path) {
+  $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+  if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') { return $false }
+  $Chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+  $Chain.ChainPolicy.RevocationMode = 'NoCheck'
+  try {
+    $Chain.Build($Signature.SignerCertificate) | Out-Null
+    $Root = $Chain.ChainElements[$Chain.ChainElements.Count - 1].Certificate
+    $Root.Subject -match '^CN=Microsoft Root Certificate Authority'
+  }
+  finally { $Chain.Dispose() }
+}
+
+# An extracted defender-update-kit: check the cab and script are signed by
+# Microsoft and read the versions from the cab's package-defender.xml. Throws otherwise.
+function Get-DefenderKit([string] $Directory) {
+  $Cab = @(Get-ChildItem -LiteralPath $Directory -Filter 'defender-dism-*.cab' -File -ErrorAction SilentlyContinue)
+  $Script = Join-Path $Directory 'DefenderUpdateWinImage.ps1'
+  if ($Cab.Count -ne 1 -or -not (Test-Path $Script)) { throw "$Directory doesn't hold one defender-dism-*.cab and DefenderUpdateWinImage.ps1." }
+  foreach ($File in $Cab[0].FullName, $Script) {
+    if (-not (Test-MicrosoftSignature $File)) { throw "$File is not validly signed by Microsoft; refusing the kit." }
+  }
+
+  $Temporary = Join-Path $DefenderCache 'xml'
+  if (Test-Path $Temporary) { Remove-Item $Temporary -Recurse -Force }
+  New-Item -ItemType Directory -Force -Path $Temporary | Out-Null
+  try {
+    $Output = & expand.exe $Cab[0].FullName '-F:package-defender.xml' $Temporary 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "expand.exe failed with exit code $($LASTEXITCODE): $Output" }
+    [xml] $Xml = Get-Content -Raw (Join-Path $Temporary 'package-defender.xml')
+  }
+  finally { Remove-Item $Temporary -Recurse -Force -ErrorAction Continue }
+
+  [PSCustomObject]@{
+    Cab        = $Cab[0].FullName
+    Package    = "$($Xml.packageinfo.versions.defender)"
+    Platform   = "$($Xml.packageinfo.versions.platform)"
+    Engine     = "$($Xml.packageinfo.versions.engine)"
+    Signatures = "$($Xml.packageinfo.versions.signatures)"
+  }
+}
+
+# Refresh the cached kit if Microsoft's copy changed, then return the cached kit
+# (or $null). The fwlink redirects to a blob whose URL carries the package
+# version; that URL, ETag, Last-Modified and size identify it without downloading.
+# Best effort: a failed refresh keeps the cached kit; no usable kit means no update.
+function Update-DefenderKit {
+  $Current = Join-Path $DefenderCache 'current'
+  $StateFile = Join-Path $DefenderCache 'kit.json'
+  New-Item -ItemType Directory -Force -Path $DefenderCache | Out-Null
+
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $Head = Invoke-WebRequest -Uri $DefenderUrl -Method Head -UseBasicParsing -TimeoutSec 120
+    $Remote = [ordered]@{
+      source       = $Head.BaseResponse.ResponseUri.AbsoluteUri
+      etag         = "$($Head.Headers['ETag'])"
+      lastModified = "$($Head.Headers['Last-Modified'])"
+      length       = "$($Head.Headers['Content-Length'])"
+    }
+    $State = if (Test-Path $StateFile) { Get-Content -Raw $StateFile | ConvertFrom-Json }
+    $Changed = @($Remote.Keys | Where-Object { "$(Get-ConfigValue $State $_)" -ne $Remote[$_] })
+
+    if (-not $Changed -and (Test-Path $Current)) {
+      Write-Host "runner: Defender update kit $(Get-ConfigValue $State 'package') is current (published $($Remote.lastModified))."
+    }
+    else {
+      Write-Host "runner: downloading the Defender update kit from $($Remote.source)."
+      $Zip = Join-Path $DefenderCache 'download.zip'
+      $New = Join-Path $DefenderCache 'new'
+      foreach ($Path in $Zip, $New) { if (Test-Path $Path) { Remove-Item $Path -Recurse -Force } }
+
+      Invoke-WebRequest -Uri $Remote.source -OutFile $Zip -UseBasicParsing -TimeoutSec 1800
+      if ($Remote.length -and (Get-Item $Zip).Length -ne [int64] $Remote.length) {
+        throw "downloaded $((Get-Item $Zip).Length) bytes, expected $($Remote.length)."
+      }
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      [System.IO.Compression.ZipFile]::ExtractToDirectory($Zip, $New)
+      # verify before it replaces a good cached kit
+      $Kit = Get-DefenderKit $New
+
+      $Old = "$Current.old"
+      if (Test-Path $Old) { Remove-Item $Old -Recurse -Force }
+      if (Test-Path $Current) { Rename-Item $Current (Split-Path -Leaf $Old) }
+      Rename-Item $New (Split-Path -Leaf $Current)
+      foreach ($Path in $Old, $Zip) { if (Test-Path $Path) { Remove-Item $Path -Recurse -Force } }
+
+      $Remote['package'] = $Kit.Package
+      $Remote['downloaded'] = (Get-Date -Format o)
+      [PSCustomObject] $Remote | ConvertTo-Json | Set-Content -Encoding utf8 -Path $StateFile
+      Write-Host "runner: Defender update kit $($Kit.Package) downloaded: platform $($Kit.Platform), engine $($Kit.Engine), security intelligence $($Kit.Signatures)."
+    }
+  }
+  catch {
+    Write-Warning "runner: couldn't refresh the Defender update kit from $($DefenderUrl): $_ Using the cached kit, if any."
+  }
+
+  if (-not (Test-Path $Current)) {
+    Write-Warning "runner: no Defender update kit in $DefenderCache; images keep the Defender version from their media."
+    return
+  }
+  try {
+    $Kit = Get-DefenderKit $Current
+    Write-Host "runner: applying Defender update kit $($Kit.Package) (platform $($Kit.Platform), engine $($Kit.Engine), security intelligence $($Kit.Signatures))."
+    $Kit
+  }
+  catch {
+    # forget the cached identity so the next run downloads it again
+    Remove-Item $StateFile -Force -ErrorAction SilentlyContinue
+    Write-Warning "runner: cached Defender update kit can't be used: $_ Images keep the Defender version from their media."
+  }
+}
+
+#endregion
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Start-Transcript -Path (Join-Path $LogDir "runner-$(Get-Date -Format yyyyMMdd-HHmmss).log") | Out-Null
@@ -99,6 +233,10 @@ try {
     throw "runner: VirtIO.IsoPath is set but $VirtIOIso does not exist. Put a virtio-win ISO there or clear VirtIO.IsoPath."
   }
   if ($VirtIOIso) { Write-Host "runner: adding virtio-win drivers ($VirtIODrivers) from $VirtIOIso." }
+
+  # once per run, before fingerprinting: the kit version is part of the fingerprint
+  $DefenderKit = $null
+  if ($DefenderEnabled) { $DefenderKit = Update-DefenderKit }
 
   $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File | Sort-Object Name)
   Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
@@ -140,6 +278,7 @@ try {
     )
     if ($RecoveryWim) { $Arguments += @('-WinREWimPath', "`"$RecoveryWim`"") }
     if ($VirtIOIso) { $Arguments += @('-VirtIOIsoPath', "`"$VirtIOIso`"", '-VirtIODrivers', $VirtIODrivers) }
+    if ($DefenderKit) { $Arguments += @('-DefenderPackage', "`"$($DefenderKit.Cab)`"") }
 
     $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     $Minutes = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
