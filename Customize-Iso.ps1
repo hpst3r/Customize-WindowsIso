@@ -33,8 +33,10 @@ param (
   [string] $LogDir,
   # opaque string recorded in the output manifest; runner.ps1 uses it to skip unchanged inputs
   [string] $Fingerprint,
-  # optional: a virtio-win ISO. The drivers below are added to boot.wim (so Setup
-  # sees virtio disks) and to every image in install.wim (so it boots from them).
+  # optional: a JSON file with "DriverSets": [ ... ] (see DriverSets.ps1), e.g.
+  # runner-config.json. Each set's drivers go into boot.wim, install.wim and/or WinRE.
+  [string] $DriverSetsFile,
+  # optional shorthand for one virtio-iso driver set added to boot, install and winre
   [string] $VirtIOIsoPath,
   # comma-separated driver folders from the virtio-win ISO
   [string] $VirtIODrivers = 'vioscsi,viostor,NetKVM'
@@ -54,6 +56,8 @@ $ProgressPreference = 'SilentlyContinue'
 # working directories
 $ScratchPath = Join-Path $WorkingDir 'Scratch'
 $MountDir = Join-Path $WorkingDir 'Mount'
+# Winre.wim is mounted from inside the mounted install image
+$MountREDir = Join-Path $WorkingDir 'MountRE'
 $DismScratch = Join-Path $WorkingDir 'DismScratch'
 $StagingIso = Join-Path $WorkingDir 'staging.iso'
 
@@ -62,9 +66,8 @@ $script:LoadedHives = [System.Collections.Generic.List[string]]::new()
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
 $script:Removed = [System.Collections.Generic.List[string]]::new()
 $script:DriversAdded = [System.Collections.Generic.List[string]]::new()
-$script:VirtIORoot = $null
-$script:VirtIOMountedHere = $false
-$script:VirtIODriverList = @($VirtIODrivers -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+# enabled driver sets, each with Root/Label/MountedHere once opened (Open-DriverSets)
+$script:DriverSets = @()
 
 # offline hive files, relative to the root of a mounted image.
 # DEFAULTUSER is the template profile copied for new users. The DEFAULT hive in
@@ -142,15 +145,15 @@ function Invoke-Dism([string[]] $Arguments, [switch] $AllowFailure) {
 # /Optimize mounts faster but leaves files unhydrated; newer servicing stacks
 # (seen on 29xxx) then fail capability removal with 4350 (ERROR_FILE_OFFLINE).
 # Only use it for images that just get registry edits.
-function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize) {
-  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir")
+function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize, [string] $Path = $MountDir) {
+  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$Path")
   if ($Optimize) { $Arguments += '/Optimize' }
   Invoke-Dism $Arguments | Out-Null
 }
 
-function Dismount-Wim([switch] $Commit) {
+function Dismount-Wim([switch] $Commit, [string] $Path = $MountDir) {
   $Mode = if ($Commit) { '/Commit' } else { '/Discard' }
-  Invoke-Dism @('/Unmount-Image', "/MountDir:$MountDir", $Mode) | Out-Null
+  Invoke-Dism @('/Unmount-Image', "/MountDir:$Path", $Mode) | Out-Null
 }
 
 # dism /Get-ProvisionedAppxPackages prints "Key : Value" blocks separated by blank lines
@@ -304,12 +307,13 @@ function Remove-ImagePackages([string] $ImageRoot, $PackageConfig, [string] $Ima
 # Dismount any image left mounted under this working directory, discard
 # changes, and drop stale mount points. Safe to call at any time.
 function Clear-StaleMounts {
-  foreach ($Image in @(Get-WindowsImage -Mounted)) {
-    if ($Image.Path -like "$($WorkingDir)*") {
-      Write-Host "Clear-StaleMounts: discarding mounted image at $($Image.Path) (status $($Image.MountStatus))."
-      $Result = Invoke-Dism @('/Unmount-Image', "/MountDir:$($Image.Path)", '/Discard') -AllowFailure
-      if ($Result.ExitCode -ne 0) { Write-Warning "Clear-StaleMounts: dismount failed for $($Image.Path): $($Result.Output -join ' | ')" }
-    }
+  $Mounted = @(Get-WindowsImage -Mounted | Where-Object { $_.Path -like "$($WorkingDir)*" })
+  # nested mounts first: Winre.wim in MountRE lives inside the image mounted at Mount
+  $Mounted = @($Mounted | Sort-Object { $Image = $_; -not @($Mounted | Where-Object { $Image.ImagePath -like "$($_.Path)\*" }) })
+  foreach ($Image in $Mounted) {
+    Write-Host "Clear-StaleMounts: discarding mounted image at $($Image.Path) (status $($Image.MountStatus))."
+    $Result = Invoke-Dism @('/Unmount-Image', "/MountDir:$($Image.Path)", '/Discard') -AllowFailure
+    if ($Result.ExitCode -ne 0) { Write-Warning "Clear-StaleMounts: dismount failed for $($Image.Path): $($Result.Output -join ' | ')" }
   }
   Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
 }
@@ -373,9 +377,10 @@ function Set-InstallImage([string] $InstallWim, $Config) {
       Write-Host "Set-InstallImage: applying registry settings to $Label."
       Set-ImageRegistry -ImageRoot $MountDir -Groups @(Get-ConfigValue $Config.install 'Registry' @())
 
-      if ($script:VirtIORoot) {
-        Add-VirtIODrivers -ImageRoot $MountDir -OsFolder (Get-VirtIOOsFolder $Detail.Version $Detail.InstallationType) -ImageLabel $Label
-      }
+      $OsFolder = Get-DriverOsFolder $Detail.Version $Detail.InstallationType
+      Add-DriverSets -ImageRoot $MountDir -Target 'install' -OsFolder $OsFolder -ImageLabel $Label
+      # before the install image is saved: Winre.wim is a file inside it
+      Set-WinREDrivers -ImageRoot $MountDir -OsFolder $OsFolder -ImageLabel $Label
 
       Write-Host "Set-InstallImage: saving $Label."
       Dismount-Wim -Commit
@@ -444,8 +449,10 @@ function Set-WinRE([string] $ImageRoot, [string] $ImageLabel, [version] $ImageVe
   Copy-Item $WinREWimPath $Target -Force
 }
 
-# The virtio-win ISO has one folder per OS: <driver>\<w11|w10|2k25|2k22|2k19>\amd64
-function Get-VirtIOOsFolder([version] $Version, [string] $InstallationType) {
+#region drivers
+
+# OS folder for driver sets, as on the virtio-win ISO: <driver>\<w11|w10|2k25|2k22|2k19>\amd64
+function Get-DriverOsFolder([version] $Version, [string] $InstallationType) {
   if ($InstallationType -like 'Server*') {
     if ($Version.Build -ge 26100) { return '2k25' }
     if ($Version.Build -ge 20348) { return '2k22' }
@@ -455,45 +462,142 @@ function Get-VirtIOOsFolder([version] $Version, [string] $InstallationType) {
   'w10'
 }
 
-# Attach the virtio-win ISO (unless it already is) and remember its root
-function Mount-VirtIOIso {
-  $DiskImage = Get-DiskImage -ImagePath $VirtIOIsoPath
-  if (-not $DiskImage.Attached) {
-    $DiskImage = Mount-DiskImage -ImagePath $VirtIOIsoPath -StorageType ISO -Access ReadOnly -PassThru
-    $script:VirtIOMountedHere = $true
-  }
-  $Volume = Get-IsoVolume $DiskImage $VirtIOIsoPath
-  $script:VirtIORoot = "$($Volume.DriveLetter):\"
-  Write-Host "Mount-VirtIOIso: $VirtIOIsoPath ($($Volume.FileSystemLabel)) at $($script:VirtIORoot); adding $($script:VirtIODriverList -join ', ')."
-  $Volume.FileSystemLabel
+# enabled driver sets that add drivers to $Target (boot, install, winre)
+function Get-TargetDriverSets([string] $Target) {
+  @($script:DriverSets | Where-Object { $_.Targets -contains $Target })
 }
 
-# Add the configured virtio-win drivers for $OsFolder to a mounted image.
+# Attach virtio-win ISOs (unless they already are) and note each set's root
+function Open-DriverSets {
+  foreach ($Set in $script:DriverSets) {
+    $Set | Add-Member -NotePropertyMembers @{ Root = $null; Label = $Set.Name; MountedHere = $false; PerOs = $false }
+    if ($Set.Type -eq 'virtio-iso') {
+      $DiskImage = Get-DiskImage -ImagePath $Set.Path
+      if (-not $DiskImage.Attached) {
+        $DiskImage = Mount-DiskImage -ImagePath $Set.Path -StorageType ISO -Access ReadOnly -PassThru
+        $Set.MountedHere = $true
+      }
+      $Volume = Get-IsoVolume $DiskImage $Set.Path
+      $Set.Root = "$($Volume.DriveLetter):\"
+      $Set.Label = $Volume.FileSystemLabel
+      $Detail = "$($Set.Label) at $($Set.Root), drivers $($Set.Drivers -join ', ')"
+    }
+    else {
+      $Set.Root = $Set.Path
+      # per-OS layout: <Path>\<w11|2k22|...>, used instead of the whole folder
+      $Set.PerOs = [bool](@(Get-ChildItem -LiteralPath $Set.Path -Directory | Where-Object { $DriverOsFolders -contains $_.Name }).Count)
+      $Detail = if ($Set.PerOs) { 'per-OS subfolders' } else { 'whole folder' }
+    }
+    Write-Host "Open-DriverSets: '$($Set.Name)' ($($Set.Type)) from $($Set.Path): $Detail; targets $($Set.Targets -join ', ')."
+  }
+}
+
+function Close-DriverSets {
+  foreach ($Set in @($script:DriverSets | Where-Object { $_.PSObject.Properties['MountedHere'] -and $_.MountedHere })) {
+    try { Dismount-DiskImage -ImagePath $Set.Path | Out-Null; $Set.MountedHere = $false } catch { Write-Warning "cleanup: $_" }
+  }
+}
+
+# Add the drivers of every set targeting $Target to a mounted image.
 # A missing driver folder is a warning; a DISM failure (e.g. unsigned driver) fails the build.
-function Add-VirtIODrivers([string] $ImageRoot, [string] $OsFolder, [string] $ImageLabel) {
-  foreach ($Driver in $script:VirtIODriverList) {
-    $Path = Join-Path $script:VirtIORoot "$Driver\$OsFolder\amd64"
-    if (-not (Test-Path $Path)) {
-      Add-BuildWarning "$($ImageLabel): virtio-win has no $Driver\$OsFolder\amd64; driver not added."
+function Add-DriverSets([string] $ImageRoot, [string] $Target, [string] $OsFolder, [string] $ImageLabel) {
+  foreach ($Set in (Get-TargetDriverSets $Target)) {
+    if ($Set.Type -eq 'virtio-iso') {
+      foreach ($Driver in $Set.Drivers) {
+        $Path = Join-Path $Set.Root "$Driver\$OsFolder\amd64"
+        if (-not (Test-Path $Path)) {
+          Add-BuildWarning "$($ImageLabel): $($Set.Name) ($($Set.Label)) has no $Driver\$OsFolder\amd64; driver not added."
+          continue
+        }
+        Write-Host "Add-DriverSets: adding $($Set.Name) $Driver ($OsFolder) to $ImageLabel."
+        Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path") | Out-Null
+        $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Driver\$OsFolder")
+      }
       continue
     }
-    Write-Host "Add-VirtIODrivers: adding $Driver ($OsFolder) to $ImageLabel."
-    Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path") | Out-Null
-    $script:DriversAdded.Add("$($ImageLabel): $Driver\$OsFolder")
+
+    $Path = $Set.Root
+    if ($Set.PerOs) {
+      $Path = Join-Path $Set.Root $OsFolder
+      if (-not (Test-Path -LiteralPath $Path)) {
+        Add-BuildWarning "$($ImageLabel): driver set $($Set.Name) has no $OsFolder subfolder; drivers not added."
+        continue
+      }
+    }
+    Write-Host "Add-DriverSets: adding $($Set.Name) ($Path, recursive) to $ImageLabel."
+    $Result = Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path", '/Recurse')
+    # "Installing 1 of 3 - <path>\x.inf: The driver package was successfully installed."
+    $Infs = @($Result.Output | ForEach-Object { if ($_ -match '^Installing \d+ of \d+ - (.+?\.inf): ') { $Matches[1] } })
+    foreach ($Inf in $Infs) {
+      $Relative = if ($Inf.StartsWith($Set.Root, [System.StringComparison]::OrdinalIgnoreCase)) { $Inf.Substring($Set.Root.Length).TrimStart('\') } else { $Inf }
+      $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Relative")
+    }
+    if (-not $Infs) { $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Path") }
   }
 }
 
-# $VirtIOOsFolder: add virtio-win drivers for this OS folder (empty: none)
-function Set-BootImage([string] $BootWim, $BootConfig, [string] $VirtIOOsFolder) {
+# Add the driver sets targeting winre to the Winre.wim inside a mounted install
+# image. Runs before the install image is saved; Winre.wim is mounted to a second
+# mount directory and must be dismounted before the install image is.
+function Set-WinREDrivers([string] $ImageRoot, [string] $OsFolder, [string] $ImageLabel) {
+  if (-not (Get-TargetDriverSets 'winre')) { return }
+
+  $Winre = Join-Path $ImageRoot 'Windows\System32\Recovery\Winre.wim'
+  if (-not (Test-Path -LiteralPath $Winre)) {
+    Add-BuildWarning "$($ImageLabel): no Windows\System32\Recovery\Winre.wim; drivers not added to WinRE."
+    return
+  }
+  $Label = "$ImageLabel WinRE"
+
+  # Winre.wim is hidden+system; make sure it is writable and put the attributes back after
+  $Item = Get-Item -LiteralPath $Winre -Force
+  $Attributes = $Item.Attributes
+  $SizeBefore = $Item.Length
+  $Item.Attributes = 'Normal'
+  try {
+    New-Item -ItemType Directory -Force -Path $MountREDir | Out-Null
+    Write-Host "Set-WinREDrivers: mounting $Label."
+    Mount-Wim -ImageFile $Winre -Index 1 -Path $MountREDir
+    $Saved = $false
+    try {
+      Add-DriverSets -ImageRoot $MountREDir -Target 'winre' -OsFolder $OsFolder -ImageLabel $Label
+      Dismount-Wim -Commit -Path $MountREDir
+      $Saved = $true
+    }
+    finally {
+      if (-not $Saved) {
+        Write-Warning "Set-WinREDrivers: discarding changes to $Label."
+        try { Dismount-Wim -Path $MountREDir } catch { Write-Warning "Set-WinREDrivers: discard failed: $_" }
+      }
+    }
+
+    # saving appends to the WIM; a fresh export drops the orphaned data
+    $SizeSaved = (Get-Item -LiteralPath $Winre -Force).Length
+    $Exported = Join-Path $WorkingDir 'winre.export.wim'
+    if (Test-Path $Exported) { Remove-Item $Exported -Force }
+    Invoke-Dism @('/Export-Image', "/SourceImageFile:$Winre", '/SourceIndex:1', "/DestinationImageFile:$Exported", '/Compress:max') | Out-Null
+    Copy-Item $Exported $Winre -Force
+    Remove-Item $Exported -Force
+    Write-Host "Set-WinREDrivers: $Label is $([math]::Round((Get-Item -LiteralPath $Winre -Force).Length / 1MB)) MB (was $([math]::Round($SizeBefore / 1MB)) MB; $([math]::Round($SizeSaved / 1MB)) MB before export)."
+  }
+  finally {
+    (Get-Item -LiteralPath $Winre -Force).Attributes = $Attributes
+  }
+}
+
+#endregion
+
+# $DriverOsFolder: add the driver sets targeting boot, for this OS folder (empty: none)
+function Set-BootImage([string] $BootWim, $BootConfig, [string] $DriverOsFolder) {
   $LabConfig = Get-ConfigValue $BootConfig 'LabConfig'
   $Values = @(if ($LabConfig) { $LabConfig.PSObject.Properties | Where-Object { $_.Value } })
-  if (-not $Values -and -not $VirtIOOsFolder) { Write-Host 'Set-BootImage: no LabConfig bypasses or drivers to add; leaving boot.wim alone.'; return }
+  if (-not $Values -and -not $DriverOsFolder) { Write-Host 'Set-BootImage: no LabConfig bypasses or drivers to add; leaving boot.wim alone.'; return }
 
   $Index = Get-SetupBootIndex $BootWim
-  Write-Host "Set-BootImage: mounting boot.wim index $Index (LabConfig: $($Values.Name -join ', '); drivers: $VirtIOOsFolder)."
+  Write-Host "Set-BootImage: mounting boot.wim index $Index (LabConfig: $($Values.Name -join ', '); drivers: $DriverOsFolder)."
 
   # adding drivers needs a full mount; a registry edit alone doesn't
-  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize:(-not $VirtIOOsFolder)
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize:(-not $DriverOsFolder)
   $Saved = $false
   try {
     if ($Values) {
@@ -507,8 +611,8 @@ function Set-BootImage([string] $BootWim, $BootConfig, [string] $VirtIOOsFolder)
         Dismount-OfflineHive $Hive
       }
     }
-    if ($VirtIOOsFolder) {
-      Add-VirtIODrivers -ImageRoot $MountDir -OsFolder $VirtIOOsFolder -ImageLabel "boot.wim[$Index]"
+    if ($DriverOsFolder) {
+      Add-DriverSets -ImageRoot $MountDir -Target 'boot' -OsFolder $DriverOsFolder -ImageLabel "boot.wim[$Index]"
     }
     Dismount-Wim -Commit
     $Saved = $true
@@ -640,7 +744,19 @@ try {
   $Config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
   if (-not (Test-Path $Autounattend)) { throw "Autounattend file not found: $Autounattend" }
   if ($WinREWimPath -and -not (Test-Path $WinREWimPath)) { throw "WinRE file not found: $WinREWimPath" }
-  if ($VirtIOIsoPath -and -not (Test-Path $VirtIOIsoPath)) { throw "virtio-win ISO not found: $VirtIOIsoPath" }
+
+  # driver sets: from -DriverSetsFile (runner-config.json style, or a bare array) and/or -VirtIOIsoPath.
+  # Get-DriverSets fails on a configured set whose path is missing.
+  . (Join-Path $PSScriptRoot 'DriverSets.ps1')
+  $script:DriverSets = @()
+  if ($DriverSetsFile) {
+    $SetsConfig = Get-Content -Raw $DriverSetsFile | ConvertFrom-Json
+    if ($SetsConfig -is [array]) { $SetsConfig = [PSCustomObject]@{ DriverSets = $SetsConfig } }
+    $script:DriverSets += @(Get-DriverSets $SetsConfig)
+  }
+  if ($VirtIOIsoPath) {
+    $script:DriverSets += @(Get-DriverSets ([PSCustomObject]@{ VirtIO = [PSCustomObject]@{ IsoPath = $VirtIOIsoPath; Drivers = @($VirtIODrivers -split ',') } }))
+  }
 
   # DISM logs and scratch space live with the build, not on C:
   New-Item -ItemType Directory -Force -Path $WorkingDir, $MountDir, $DismScratch | Out-Null
@@ -679,12 +795,11 @@ try {
   $ImageCount = @(Get-WindowsImage -ImagePath $InstallWim).Count
 
   # boot.wim gets the drivers for the OS on this media (from the first image)
-  $VirtIOLabel = $null
-  $BootVirtIOFolder = $null
-  if ($VirtIOIsoPath) {
-    $VirtIOLabel = Mount-VirtIOIso
+  Open-DriverSets
+  $BootDriverFolder = $null
+  if (Get-TargetDriverSets 'boot') {
     $First = Get-WindowsImage -ImagePath $InstallWim -Index 1
-    $BootVirtIOFolder = Get-VirtIOOsFolder $First.Version $First.InstallationType
+    $BootDriverFolder = Get-DriverOsFolder $First.Version $First.InstallationType
   }
 
   Write-Host 'Customize-Iso: adding autounattend.xml and post-install stubs.'
@@ -698,7 +813,7 @@ try {
   $InstallImage = @(Set-InstallImage -InstallWim $InstallWim -Config $Config)[-1]
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
-  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -VirtIOOsFolder $BootVirtIOFolder
+  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -DriverOsFolder $BootDriverFolder
 
   Write-Host 'Customize-Iso: building ISO.'
   New-IsoImage -Source $ScratchPath -OutputFile $StagingIso -Label $VolumeLabel `
@@ -730,7 +845,8 @@ try {
     format      = [System.IO.Path]::GetExtension($InstallImage).TrimStart('.')
     images      = @($Images)
     removed     = @($script:Removed)
-    virtio      = $VirtIOLabel
+    virtio      = @($script:DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Label) | Select-Object -First 1
+    driverSets  = @($script:DriverSets | ForEach-Object { [PSCustomObject]@{ name = $_.Name; type = $_.Type; path = $_.Path; label = $_.Label; targets = @($_.Targets) } })
     drivers     = @($script:DriversAdded)
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
@@ -762,9 +878,7 @@ finally {
     }
     catch { Write-Warning "cleanup: $_" }
   }
-  if ($script:VirtIOMountedHere) {
-    try { Dismount-DiskImage -ImagePath $VirtIOIsoPath | Out-Null } catch { Write-Warning "cleanup: $_" }
-  }
+  Close-DriverSets
   Stop-Transcript | Out-Null
 }
 

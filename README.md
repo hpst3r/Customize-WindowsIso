@@ -101,18 +101,54 @@ since the first one found wins.
 > The scripts may contain credentials in plain text (e.g. `10-create-user.ps1`), so anyone
 > who can read `postinstall.iso` can read them.
 
-## VirtIO drivers (QEMU/KVM, Proxmox)
+## Driver sets (boot-critical storage and network drivers)
 
-To install onto **virtio-scsi** (or virtio-blk) disks, Setup and the installed OS both need
-the storage driver, so it has to be in the images, not only on a second disk. With a
-virtio-win ISO configured, every customized ISO gets:
+To install onto a disk Windows has no inbox driver for (virtio-scsi, many RAID/NVMe
+controllers), Setup, the installed OS and the recovery environment all need the storage driver,
+so it has to be in the images, not only on a second disk. `DriverSets` in `runner-config.json`
+lists the driver sets to add:
 
-- the drivers in `VirtIO.Drivers` (default `vioscsi`, `viostor`, `NetKVM`) added to the Setup
-  image in `boot.wim`, so Setup sees the disk, and to every image in `install.wim`, so the
-  installed OS boots from it and has networking for the OOBE scripts
-- the matching OS folder from the virtio-win ISO: `w11` (client), `2k22`, `2k25` (server)
+```json
+"DriverSets": [
+  { "Name": "VirtIO", "Type": "virtio-iso", "Path": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
+    "Drivers": ["vioscsi", "viostor", "NetKVM"], "Targets": ["boot", "install", "winre"] },
+  { "Name": "Storage", "Type": "folder", "Path": "Y:\\IsoBuild\\Drivers\\Storage",
+    "Targets": ["boot", "install", "winre"], "Enabled": false }
+]
+```
 
-`postinstall.iso` also gets `virtio\virtio-win-guest-tools.exe` and its SHA-256, and
+- `Type`:
+  - `virtio-iso`: a virtio-win ISO. `Drivers` are its driver folders (default `vioscsi`,
+    `viostor`, `NetKVM`); the OS folder is picked per image: `w11` (client), `2k22`, `2k25` (server).
+  - `folder`: a folder of drivers, e.g. a per-model pack exported with `pnputil /export-driver * <dir>`,
+    added with `dism /Add-Driver /Recurse`. If it has OS subfolders (`w10`, `w11`, `2k19`, `2k22`,
+    `2k25`), only the one matching each image is used (an image with no matching subfolder gets a
+    warning); otherwise the whole folder is added to every image. Keep it to boot-critical
+    storage and network drivers for the right architecture: everything in it goes into each target.
+- `Targets` (default all three):
+  - `boot`: the Setup image in `boot.wim`, so Setup sees the disk (and the network)
+  - `install`: every image in `install.wim`, so the installed OS boots from the disk and has
+    networking for the OOBE scripts
+  - `winre`: `Windows\System32\Recovery\Winre.wim` inside each install image, so the recovery
+    environment sees the disk. It is mounted inside the mounted install image, then re-exported to
+    drop orphaned data. An image without a Winre.wim gets a warning.
+- `Enabled: false` turns a set off; so does an empty `Path`. If an enabled set's `Path` doesn't
+  exist, the run fails rather than building images without the drivers.
+
+DISM refuses unsigned drivers, which fails the build. The drivers added to each image are listed
+in the `drivers` field of the output `.json` (e.g. `[1] Windows 11 Pro WinRE: VirtIO vioscsi\w11`).
+Replacing the virtio-win ISO, changing a driver folder or editing a set rebuilds every ISO on the
+next run. The older `"VirtIO": { "IsoPath", "Drivers" }` block still works when there is no
+`DriverSets`: it is one `virtio-iso` set targeting all three.
+
+`Customize-Iso.ps1` takes the sets with `-DriverSetsFile <json>` (a file with `DriverSets`, such as
+`runner-config.json`; the runner passes a copy in the working directory), or a single virtio-win
+ISO with `-VirtIOIsoPath`/`-VirtIODrivers`.
+
+### VirtIO (QEMU/KVM, Proxmox)
+
+Besides the drivers in the images, `postinstall.iso` gets `virtio\virtio-win-guest-tools.exe`
+from the (first) `virtio-iso` set and its SHA-256, and
 `.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs it silently (balloon, serial,
 QEMU guest agent, SPICE agent, the remaining drivers) when the machine has VirtIO devices.
 On anything else it does nothing.
@@ -125,13 +161,9 @@ OOBE script only runs it if it is validly signed or matches the SHA-256 recorded
 The virtio-win ISO isn't downloaded automatically. The fedorapeople.org directory listings are
 behind a browser challenge, though direct file links work, e.g.
 `curl -LO https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso`.
-Put the ISO at `VirtIO.IsoPath` in `runner-config.json`
+Put the ISO at the `Path` of the `virtio-iso` set in `runner-config.json`
 (default `Y:\IsoBuild\Cache\virtio-win.iso`); replacing it with a newer one rebuilds every ISO
-on the next run. If the path is set but the file is missing, the run fails rather than building
-images without the drivers. Clear `VirtIO.IsoPath` to turn this off.
-
-The drivers are not added to WinRE inside the images, so the recovery environment won't see a
-virtio-scsi disk.
+on the next run. Set `Enabled` to false to turn this off.
 
 ## Weekly runs
 
