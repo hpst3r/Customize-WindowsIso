@@ -39,6 +39,8 @@ $Autounattend = Get-ConfigValue $Config 'AutounattendFile' (Join-Path $PSScriptR
 $RecoveryWim = Get-ConfigValue $Config 'RecoveryWimPath' ''
 $LogDir = Get-ConfigValue $Config 'LogDirectory' (Join-Path $PSScriptRoot 'logs')
 $LogRetentionDays = Get-ConfigValue $Config 'LogRetentionDays' 90
+# keep the ISO a rebuild replaces as <name>.previous.iso in the output directory
+$KeepPrevious = [bool](Get-ConfigValue $Config 'KeepPrevious' $true)
 
 # optional virtio-win ISO: drivers go into the images, guest tools onto postinstall.iso
 $VirtIO = Get-ConfigValue $Config 'VirtIO'
@@ -170,7 +172,9 @@ try {
   }
   if ($VirtIOIso) { Write-Host "runner: adding virtio-win drivers ($VirtIODrivers) from $VirtIOIso." }
 
-  $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File | Sort-Object Name)
+  # *.previous.iso is a kept copy of an older output, never an input
+  $IsoFiles = @(Get-ChildItem -Path $Config.InputDirectory -Filter '*.iso' -File |
+      Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' } | Sort-Object Name)
   Write-Host "runner: found $($IsoFiles.Count) ISO(s): $(@($IsoFiles | ForEach-Object Name) -join ', ')"
 
   foreach ($IsoFile in $IsoFiles) {
@@ -210,6 +214,7 @@ try {
     )
     if ($RecoveryWim) { $Arguments += @('-WinREWimPath', "`"$RecoveryWim`"") }
     if ($VirtIOIso) { $Arguments += @('-VirtIOIsoPath', "`"$VirtIOIso`"", '-VirtIODrivers', $VirtIODrivers) }
+    if ($KeepPrevious) { $Arguments += '-KeepPrevious' }
 
     $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     $Minutes = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)

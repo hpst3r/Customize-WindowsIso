@@ -40,6 +40,15 @@ Outputs, written only after the ISO has been built and verified:
 - `<name>.iso.sha256.txt`
 - `<name>.iso.json`: images, removed packages, warnings, build time, and the fingerprint used by the runner
 
+With `-KeepPrevious` (the runner passes it unless `KeepPrevious` is `false` in
+`runner-config.json`), the ISO being replaced and its sidecars are kept as
+`<name>.previous.iso` (`.previous.iso.json`, `.previous.iso.sha256.txt`), replacing any older
+previous copy, so last week's image is still there if this week's turns out bad. This roughly
+doubles the space the output directory needs. If a client on the share has the old previous
+copy open it can't be replaced: the build still succeeds, with a warning, without keeping the
+ISO it replaced. If a client has the current ISO open it can't be replaced at all: the build
+fails and leaves the current ISO and its sidecars as they were.
+
 If an image has several editions (e.g. the four Windows Server editions), the
 `/IMAGE/INDEX` selection is removed from the unattend so Setup asks which edition to
 install. With a single edition, Setup installs it without asking.
