@@ -633,20 +633,106 @@ function Set-BootImage([string] $BootWim, $BootConfig, [string] $DriverOsFolder)
 # Copy autounattend.xml to the media. When install.wim has several images the
 # hard-coded /IMAGE/INDEX is removed so Setup asks which edition to install
 # instead of silently installing index 1.
-function Set-Unattend([string] $Source, [string] $MediaRoot, [int] $ImageCount) {
+# With $DiskPickerDir (iso.DiskPicker), the media copy loses its disk settings, so
+# Setup asks for a disk if it is ever started without the picker, and the answer
+# file the picker hands to Setup is written to $DiskPickerDir in two halves split
+# where <InstallTo> goes (see winpe\diskpicker.cmd).
+function Set-Unattend([string] $Source, [string] $MediaRoot, [int] $ImageCount, [string] $DiskPickerDir) {
   $Destination = Join-Path $MediaRoot 'autounattend.xml'
   [xml] $Xml = Get-Content -Raw -Path $Source
+  $Ns = New-Object System.Xml.XmlNamespaceManager $Xml.NameTable
+  $Ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
 
   if ($ImageCount -gt 1) {
-    $Ns = New-Object System.Xml.XmlNamespaceManager $Xml.NameTable
-    $Ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
     foreach ($Node in @($Xml.SelectNodes('//u:ImageInstall/u:OSImage/u:InstallFrom', $Ns))) {
       Write-Host "Set-Unattend: $ImageCount images in install.wim - removing InstallFrom so Setup prompts for the edition."
       $Node.ParentNode.RemoveChild($Node) | Out-Null
     }
   }
 
+  if ($DiskPickerDir) {
+    $SetupPath = "//u:settings[@pass='windowsPE']/u:component[@name='Microsoft-Windows-Setup']"
+    $OSImage = @($Xml.SelectNodes("$SetupPath/u:ImageInstall/u:OSImage", $Ns))
+    if ($OSImage.Count -ne 1) { throw "Set-Unattend: the disk picker needs one windowsPE Microsoft-Windows-Setup ImageInstall/OSImage in $Source, found $($OSImage.Count)." }
+    # the picker partitions the disk itself
+    Write-Host 'Set-Unattend: disk picker - removing DiskConfiguration and InstallTo; the picker sets the target disk at install time.'
+    foreach ($Node in @($Xml.SelectNodes("$SetupPath/u:DiskConfiguration", $Ns)) + @($OSImage[0].SelectNodes('u:InstallTo | u:InstallToAvailablePartition', $Ns))) {
+      $Node.ParentNode.RemoveChild($Node) | Out-Null
+    }
+  }
+
   $Xml.Save($Destination)
+
+  if ($DiskPickerDir) {
+    $Marker = '@@DISKPICKER_INSTALLTO@@'
+    $InstallTo = $Xml.CreateElement('InstallTo', 'urn:schemas-microsoft-com:unattend')
+    $InstallTo.InnerText = $Marker
+    $OSImage[0].AppendChild($InstallTo) | Out-Null
+    $Template = Join-Path $DiskPickerDir 'unattend-template.xml'
+    $Xml.Save($Template)
+    $Parts = @([IO.File]::ReadAllText($Template) -split [regex]::Escape($Marker))
+    if ($Parts.Count -ne 2) { throw "Set-Unattend: could not split the disk picker answer file at its InstallTo." }
+    # the halves are joined with cmd's copy /b, so no BOM in the second half
+    $Utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $DiskPickerDir 'unattend-head.xml'), $Parts[0], $Utf8)
+    [IO.File]::WriteAllText((Join-Path $DiskPickerDir 'unattend-tail.xml'), $Parts[1], $Utf8)
+    Remove-Item $Template
+  }
+}
+
+# The disk picker (iso.DiskPicker): put winpe\diskpicker.cmd and the answer file
+# halves from Set-Unattend into the Setup image of boot.wim, and start it from
+# winpeshl.ini. The Setup image's shell is winpeshl.exe, which runs winpeshl.ini
+# when there is one and X:\setup.exe otherwise; the picker runs Setup itself.
+# Separate from Set-BootImage at the cost of a second mount, so that neither
+# needs to know about the other.
+function Add-DiskPicker([string] $BootWim, [string] $StagingDir, [int] $MinSizeGB) {
+  $Source = Join-Path $PSScriptRoot 'winpe'
+  # cmd.exe needs CRLF line endings and no BOM, whatever git did to the checkout
+  foreach ($Name in 'diskpicker.cmd', 'winpeshl.ini') {
+    $Text = [IO.File]::ReadAllText((Join-Path $Source $Name)) -replace "`r?`n", "`r`n"
+    if ($Text -match '[^\x00-\x7F]') { throw "Add-DiskPicker: winpe\$Name must be plain ASCII." }
+    [IO.File]::WriteAllText((Join-Path $StagingDir $Name), $Text, [System.Text.Encoding]::ASCII)
+  }
+  [IO.File]::WriteAllText((Join-Path $StagingDir 'settings.cmd'), "set `"DP_MIN_GB=$MinSizeGB`"`r`n", [System.Text.Encoding]::ASCII)
+
+  $Index = Get-SetupBootIndex $BootWim
+  Write-Host "Add-DiskPicker: adding the disk picker to boot.wim index $Index (automatic install when exactly one disk has $MinSizeGB GB or more)."
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
+  $Saved = $false
+  try {
+    $System32 = Join-Path $MountDir 'Windows\System32'
+    foreach ($Required in 'winpeshl.exe', 'diskpart.exe', 'wpeutil.exe', 'reg.exe') {
+      if (-not (Test-Path (Join-Path $System32 $Required))) { throw "Add-DiskPicker: boot.wim[$Index] has no $Required." }
+    }
+    if (-not (Test-Path (Join-Path $MountDir 'setup.exe')) -and -not (Test-Path (Join-Path $MountDir 'sources\setup.exe'))) {
+      throw "Add-DiskPicker: boot.wim[$Index] has no setup.exe."
+    }
+    if (Test-Path (Join-Path $System32 'winpeshl.ini')) { throw "Add-DiskPicker: boot.wim[$Index] already has a winpeshl.ini." }
+
+    # without winpeshl.exe as the shell, winpeshl.ini is never read and Setup starts
+    # as usual - showing its disk page, since the media answer file has no disk
+    $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
+    try { $Shell = "$((Invoke-Native reg.exe @('query', "$Hive\Setup", '/v', 'CmdLine') -AllowFailure).Output)" }
+    finally { Dismount-OfflineHive $Hive }
+    if ($Shell -notmatch 'winpeshl\.exe') {
+      Add-BuildWarning "boot.wim[$Index]: the shell is not winpeshl.exe ($Shell), so the disk picker won't run; Setup will ask for the disk."
+    }
+
+    $Target = Join-Path $MountDir 'DiskPicker'
+    New-Item -ItemType Directory -Force -Path $Target | Out-Null
+    foreach ($Name in 'diskpicker.cmd', 'settings.cmd', 'unattend-head.xml', 'unattend-tail.xml') {
+      Copy-Item (Join-Path $StagingDir $Name) $Target
+    }
+    Copy-Item (Join-Path $StagingDir 'winpeshl.ini') $System32
+    Dismount-Wim -Commit
+    $Saved = $true
+  }
+  finally {
+    if (-not $Saved) {
+      try { Dismount-Wim } catch { Write-Warning "Add-DiskPicker: discard failed: $_" }
+    }
+  }
 }
 
 function Find-Oscdimg {
@@ -829,8 +915,18 @@ try {
     $BootDriverFolder = Get-DriverOsFolder $First.Version $First.InstallationType
   }
 
+  # iso.DiskPicker: pick the target disk in WinPE instead of wiping disk 0
+  $IsoConfig = Get-ConfigValue $Config 'iso'
+  $DiskPicker = [bool](Get-ConfigValue $IsoConfig 'DiskPicker' $false)
+  $DiskPickerDir = $null
+  if ($DiskPicker) {
+    $DiskPickerDir = Join-Path $WorkingDir 'DiskPicker'
+    if (Test-Path $DiskPickerDir) { Remove-Item $DiskPickerDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $DiskPickerDir | Out-Null
+  }
+
   Write-Host 'Customize-Iso: adding autounattend.xml and post-install stubs.'
-  Set-Unattend -Source $Autounattend -MediaRoot $ScratchPath -ImageCount $ImageCount
+  Set-Unattend -Source $Autounattend -MediaRoot $ScratchPath -ImageCount $ImageCount -DiskPickerDir $DiskPickerDir
   $OemPath = Join-Path $ScratchPath 'sources\$OEM$\$1'
   New-Item -ItemType Directory -Force -Path $OemPath | Out-Null
   Copy-Item (Join-Path $PSScriptRoot 'stub-scripts\*') $OemPath -Recurse -Force
@@ -841,6 +937,9 @@ try {
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
   Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -DriverOsFolder $BootDriverFolder
+  if ($DiskPicker) {
+    Add-DiskPicker -BootWim $BootWim -StagingDir $DiskPickerDir -MinSizeGB ([int](Get-ConfigValue $IsoConfig 'DiskPickerMinSizeGB' 50))
+  }
 
   Write-Host 'Customize-Iso: building ISO.'
   New-IsoImage -Source $ScratchPath -OutputFile $StagingIso -Label $VolumeLabel `
@@ -891,6 +990,7 @@ try {
     virtio      = @($script:DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Label) | Select-Object -First 1
     driverSets  = @($script:DriverSets | ForEach-Object { [PSCustomObject]@{ name = $_.Name; type = $_.Type; path = $_.Path; label = $_.Label; targets = @($_.Targets) } })
     drivers     = @($script:DriversAdded)
+    diskpicker  = $DiskPicker
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
   } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $ManifestPath

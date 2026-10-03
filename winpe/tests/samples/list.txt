@@ -1,0 +1,12 @@
+
+Microsoft DiskPart version 10.0.26100.1150
+
+Copyright (C) Microsoft Corporation.
+On computer: MINWINPC
+
+  Disk ###  Status         Size     Free     Dyn  Gpt
+  --------  -------------  -------  -------  ---  ---
+  Disk 0    Online           64 GB  1024 KB        *
+  Disk 1    Online          256 GB  1024 KB        *
+
+Leaving DiskPart...

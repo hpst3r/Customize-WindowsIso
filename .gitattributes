@@ -1,0 +1,3 @@
+# cmd.exe in WinPE needs CRLF (Customize-Iso.ps1 also converts when copying into boot.wim)
+*.cmd text eol=crlf
+*.ini text eol=crlf
