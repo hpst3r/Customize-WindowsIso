@@ -245,11 +245,17 @@ function Get-DriverInfs {
       Where-Object { $_ -match '^\s*Original File Name\s*:\s*(.+?)\s*$' } | ForEach-Object { $Matches[1].ToLowerInvariant() })
 }
 
-# Manifest entries look like "[1] Windows 11 Pro: vioscsi\w11" or "boot.wim[2]: vioscsi\w11"
-function Get-ExpectedDrivers([string] $LabelLike) {
+# Manifest entries are "<label>: <set> <driver>\<os>" for virtio sets, "<label>: <set> <path>\<file>.inf"
+# for folder sets, or "<label>: <driver>\<os>" from older builds, e.g. "boot.wim[2]: VirtIO vioscsi\w11".
+# Labels are matched exactly: "[1] Windows 11 Pro" is not a -like pattern ([1] is a character class),
+# and "[1] Windows 11 Pro WinRE" entries belong to WinRE, not the install image.
+function Get-ExpectedDrivers([string] $Label) {
   if ($ExpectDrivers) { return @($ExpectDrivers) }
   @(foreach ($Entry in @(Get-ConfigValue $script:Manifest 'drivers' @())) {
-      if ("$Entry" -match '^(?<label>.+?): (?<driver>[^\\]+)\\' -and $Matches.label -like $LabelLike) { $Matches.driver }
+      if ("$Entry" -notmatch '^(?<label>.+?): (?<rest>.+)$' -or $Matches.label -ne $Label) { continue }
+      $Token = @($Matches.rest -split '\s+')[-1]
+      if ($Token -like '*.inf') { [System.IO.Path]::GetFileNameWithoutExtension($Token) }
+      else { @($Token -split '\\')[0] }
     }) | Sort-Object -Unique
 }
 
@@ -290,7 +296,7 @@ function Test-InstallImage([string] $Scope, [int] $Index, $Config) {
   }
 
   Test-ImageRegistry $Scope @(Get-ConfigValue $Config.install 'Registry' @())
-  Test-Drivers $Scope (Get-ExpectedDrivers "[$Index] *")
+  Test-Drivers $Scope (Get-ExpectedDrivers $Scope)
 }
 
 function Test-BootImage([string] $BootWim, $Config) {
@@ -318,7 +324,7 @@ function Test-BootImage([string] $BootWim, $Config) {
       }
       finally { Dismount-Hive $Hive }
     }
-    Test-Drivers $Scope (Get-ExpectedDrivers 'boot.wim*')
+    Test-Drivers $Scope (Get-ExpectedDrivers $Scope)
   }
   finally { try { Dismount-ReadOnly } catch { Write-Warning "unmount: $_" } }
 }
