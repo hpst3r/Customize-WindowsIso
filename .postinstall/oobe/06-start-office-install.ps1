@@ -5,7 +5,7 @@
 # sets HKLM\SOFTWARE\Customize-WindowsIso\Postinstall InstallOffice = 1), and only if Office
 # isn't installed already.
 #
-# Installs from office\ on the post-install media (USB/Ventoy drive or postinstall.iso; fastest
+# Installs from office\ on the post-install media (USB/Ventoy drive or postinstall-client.iso; fastest
 # from an SSD), falling back to Microsoft's CDN for anything missing there. Without office\ on
 # any drive, setup.exe is downloaded and Office comes from the CDN.
 # What gets installed: .postinstall\office\configuration.xml.

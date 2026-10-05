@@ -181,27 +181,35 @@ Keys: arrows to move and expand/collapse, a letter to jump, Enter to select (it 
 scripts and asks again before running), Esc to run nothing. With no subfolders, the
 top-level scripts run without a menu, as before.
 
-## Post-install scripts for VMs (`postinstall.iso`)
+## Post-install scripts for VMs (`postinstall-client.iso`, `postinstall-server.iso`)
 
-For virtual machines, `New-PostinstallIso.ps1` packs the repo's `.postinstall` folder into a small,
-non-bootable `postinstall.iso` to attach as a second CD-ROM. The runner builds it into the
-output directory each run (`BuildPostinstallIso` in `runner-config.json`), and only rebuilds it when
-the scripts change. It has to be attached as a disk: specialize runs as SYSTEM before
-networking, so a network share won't work. Only attach one drive with a `.postinstall` folder,
-since the first one found wins.
+For virtual machines, `New-PostinstallIso.ps1` packs the repo's `.postinstall` folder into a
+non-bootable ISO to attach as a second CD-ROM. The runner builds two into the output directory
+each run (`BuildPostinstallIso` in `runner-config.json`), each only rebuilt when its contents change:
+
+| ISO | Contents | Attach to |
+|---|---|---|
+| `postinstall-client.iso` | `.postinstall`, VirtIO guest tools, Microsoft 365 Apps (`office\`, ~4 GB) | client VMs |
+| `postinstall-server.iso` | `.postinstall`, VirtIO guest tools (a few MB) | server VMs |
+
+The scripts are the same on both; servers never install Office (see below), so they don't need
+to carry it. An ISO has to be attached as a disk: specialize runs as SYSTEM before networking,
+so a network share won't work. Only attach one drive with a `.postinstall` folder, since the
+first one found wins. (`postinstall.iso`, from before the split, is no longer updated; delete it
+once no VM refers to it.)
 
 > The scripts may contain credentials in plain text (e.g. `10-create-user.ps1`), so anyone
-> who can read `postinstall.iso` can read them.
+> who can read the ISOs can read them.
 
-The runner also keeps the ISO's contents as a folder (`PostinstallFolder`, default
+The runner also keeps the client ISO's contents as a folder (`PostinstallFolder`, default
 `<OutputDirectory>\postinstall`): `.postinstall`, `office` and `virtio`, ready for the root of a
 USB stick or Ventoy drive. `Copy-PostinstallMedia.ps1` copies them there, mirroring just those
 three folders (only changed files are copied; nothing else on the drive is touched):
 
 ```powershell
 .\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\
-# or from the ISO; -SkipOffice leaves the 4 GB office\ folder off (machines download Office instead)
-.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall.iso -Destination E:\ -SkipOffice
+# server-only drive: -SkipOffice leaves the 4 GB office\ folder off (or use postinstall-server.iso as the source)
+.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\ -SkipOffice
 ```
 
 ## Microsoft 365 Apps at first logon
@@ -212,7 +220,7 @@ Client images install Microsoft 365 Apps (Office) at first logon, from the post-
   on the channel in `.postinstall\office\configuration.xml` (Current), and only when it has
   changed downloads it (about 4 GB, a few minutes) with the Office Deployment Tool into
   `Office.CacheDirectory`. The build and the ODT's `setup.exe` must be signed by Microsoft. It
-  goes into `postinstall.iso` and the post-install folder as `office\`. A failed download keeps
+  goes into `postinstall-client.iso` and the post-install folder as `office\`. A failed download keeps
   the cached build. Office doesn't affect the images, so a new build doesn't rebuild them.
 - **At first logon**, `.postinstall\oobe\06-start-office-install.ps1` starts the install from
   `office\` on the post-install drive in the background, so it overlaps the other scripts
@@ -280,7 +288,7 @@ ISO with `-VirtIOIsoPath`/`-VirtIODrivers`.
 
 ### VirtIO (QEMU/KVM, Proxmox)
 
-Besides the drivers in the images, `postinstall.iso` gets `virtio\virtio-win-guest-tools.exe`
+Besides the drivers in the images, both post-install ISOs get `virtio\virtio-win-guest-tools.exe`
 from the (first) `virtio-iso` set and its SHA-256, and
 `.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs it silently (balloon, serial,
 QEMU guest agent, SPICE agent, the remaining drivers) when the machine has VirtIO devices.
@@ -288,7 +296,7 @@ On anything else it does nothing.
 
 The installers in upstream (Fedora) virtio-win builds are unsigned; only the drivers are
 (WHQL), and Windows checks those at install time. So the installer is accepted when building
-`postinstall.iso` if it is validly signed or unsigned (a broken signature is rejected), and the
+the post-install ISOs if it is validly signed or unsigned (a broken signature is rejected), and the
 OOBE script only runs it if it is validly signed or matches the SHA-256 recorded at build time.
 
 The virtio-win ISO isn't downloaded automatically. The fedorapeople.org directory listings are
@@ -455,7 +463,7 @@ Start-ScheduledTask 'Test customized ISO'   # then read the report; Unregister-S
 At the end of every run (even if some ISOs failed) the runner calls `New-ImageIndex.ps1`, which
 writes `index.html` and `index.json` to the output directory: for each ISO the editions and
 versions, the source build, build date, size, SHA-256, removed packages, drivers added,
-warnings, its status in the last run, the kept previous ISO, and `postinstall.iso`. The page is
+warnings, its status in the last run, the kept previous ISO, and the post-install ISOs. The page is
 self-contained (no external resources), works on a phone, and links to the ISOs relative to
 itself, so it can be opened straight from the share. Both files are written beside the target
 and swapped in. Set `BuildIndex` to `false` in `runner-config.json` to turn it off, or run it

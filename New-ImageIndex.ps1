@@ -7,7 +7,7 @@ Writes index.html and index.json describing the customized ISOs in a directory.
 .DESCRIPTION
 Built from the manifests Customize-Iso.ps1 writes beside each ISO: editions and
 versions, build date, size, SHA-256, removed packages, drivers, warnings, the
-kept previous ISO (<name>.previous.iso), and postinstall.iso. With
+kept previous ISO (<name>.previous.iso), and the postinstall*.iso media. With
 -SourceDirectory it adds the source build from Get-WindowsIso's <name>.iso.json,
 and with -RunSummaryPath (last-run-runner.json) each image's status in the last run.
 
@@ -155,15 +155,14 @@ function New-IndexHtml($Index) {
     "<p class=`"meta $(if ($Run.exitCode -eq 0) { '' } else { 'bad' })`">$(ConvertTo-Html $Text)</p>"
   }
   $Cards = @($Index.images | ForEach-Object { New-ImageCard $_ }) -join "`n"
-  $Post = if ($Index.postinstall) {
-    $P = $Index.postinstall
-    "<section class=`"card`"><h2><a href=`"postinstall.iso`">postinstall.iso</a></h2>" +
+  $Post = @(foreach ($P in @($Index.postinstall)) {
+    "<section class=`"card`"><h2><a href=`"$(ConvertTo-Html $P.file)`">$(ConvertTo-Html $P.file)</a></h2>" +
     "<p class=`"meta`">$(ConvertTo-Html (@((Format-Size $P.size), "built $(Format-Date $P.built)", "$($P.files.Count) files", $(if ($P.virtio) { "guest tools from $($P.virtio)" }), $(if ($P.office) { "Microsoft 365 Apps $($P.office)" })) -ne $null -join ' | '))</p>" +
-    "<p class=`"line dim`">Attach as a second CD-ROM to VMs installed from these ISOs; Setup's post-install scripts run from it.</p>" +
+    "<p class=`"line dim`">Attach as a second CD-ROM to VMs installed from these ISOs; Setup's post-install scripts run from it.$(if ($P.office) { ' Client images install Microsoft 365 Apps from it.' })</p>" +
     $(if ($P.folder) { "<p class=`"line dim`">For USB/Ventoy drives: Copy-PostinstallMedia.ps1 -Source $(ConvertTo-Html (Split-Path -Leaf $P.folder)) (in this share) -Destination &lt;drive&gt;:\</p>" }) +
     (New-ShaLine $P.sha256) +
     (New-ListBlock 'Files' $P.files) + '</section>'
-  }
+  }) -join "`n"
 
   @"
 <!DOCTYPE html>
@@ -232,7 +231,7 @@ try {
   $RunItems = @(Get-ConfigValue $Summary 'items' @())
 
   $Files = @(Get-ChildItem -Path $OutputDirectory -Filter '*.iso' -File |
-      Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' -and $_.Name -ne 'postinstall.iso' } | Sort-Object Name)
+      Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' -and $_.Name -notlike 'postinstall*.iso' } | Sort-Object Name)
 
   $Images = [System.Collections.Generic.List[object]]::new()
   foreach ($File in $Files) {
@@ -246,7 +245,7 @@ try {
   }
   # images the last run reported on that have no ISO yet (e.g. a first build that failed)
   foreach ($Item in $RunItems) {
-    if ($Item.name -like '*.iso' -and $Item.name -ne 'postinstall.iso' -and -not ($Images | Where-Object file -eq $Item.name)) {
+    if ($Item.name -like '*.iso' -and $Item.name -notlike 'postinstall*.iso' -and -not ($Images | Where-Object file -eq $Item.name)) {
       $Images.Add([PSCustomObject]@{ file = $Item.name; size = $null; hasManifest = $false; built = $null; images = @(); previous = $null })
     }
   }
@@ -262,12 +261,13 @@ try {
   }
   $Images = @($Images | Sort-Object file)
 
-  $PostinstallPath = Join-Path $OutputDirectory 'postinstall.iso'
-  $Postinstall = if (Test-Path $PostinstallPath) {
+  # postinstall-client.iso, postinstall-server.iso (and postinstall.iso from before the split)
+  $Postinstall = @(Get-ChildItem -Path $OutputDirectory -Filter 'postinstall*.iso' -File | Where-Object Extension -eq '.iso' | Sort-Object Name | ForEach-Object {
+    $PostinstallPath = $_.FullName
     $Manifest = Read-JsonFile "$PostinstallPath.json"
     [PSCustomObject]@{
-      file   = 'postinstall.iso'
-      size   = (Get-Item $PostinstallPath).Length
+      file   = $_.Name
+      size   = $_.Length
       built  = Get-ConfigValue $Manifest 'built'
       # New-PostinstallIso records it; ISOs from before that are hashed here
       sha256 = Get-ConfigValue $Manifest 'sha256' (Get-FileHash -Algorithm SHA256 $PostinstallPath).Hash.ToLowerInvariant()
@@ -276,7 +276,7 @@ try {
       folder = Get-ConfigValue $Manifest 'folder'
       files  = @(Get-ConfigValue $Manifest 'files' @())
     }
-  }
+  })
 
   $Index = [PSCustomObject]@{
     title       = $Title
