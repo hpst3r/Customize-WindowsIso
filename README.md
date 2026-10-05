@@ -341,6 +341,28 @@ rebuild. An ISO built for another reason gets whatever kit is current, and Defen
 downloads current security intelligence within minutes of going online anyway. Set
 `Defender.RebuildOnSignatureUpdate` to `true` to rebuild on every new kit.
 
+## Current WinGet (App Installer)
+
+The App Installer (WinGet) inbox in the media is whatever shipped with the release (1.21 on
+24H2-based media) until the Store updates it after the first sign-in. That old client fails
+with "Failed when opening source(s)", so post-install scripts using `winget` break on a fresh
+install. Each run therefore provisions the current release into every image that has AppX
+(Server Core doesn't, and is skipped):
+
+- **Source:** the runner checks [microsoft/winget-cli](https://github.com/microsoft/winget-cli/releases)'s
+  latest **stable** release once per run and downloads it only when the tag changed. That's the
+  `.msixbundle`, the dependencies zip and the license, about 300 MB, roughly monthly.
+- **Verification:** the bundle and dependencies zip must match the SHA-256 the release publishes
+  next to them, and the bundle and every dependency must carry a valid Microsoft signature, before
+  they replace the cached kit in `WinGet.CacheDirectory`. A failed refresh keeps the cached kit.
+- **Provisioning:** `dism /Add-ProvisionedAppxPackage` with the x64 dependencies and the license;
+  the provisioned version is then read back. A failure is a build warning (the image keeps its
+  inbox App Installer), not a failed build.
+- **Rebuilds:** the release tag is part of the runner fingerprint, so a new WinGet release rebuilds
+  every ISO once. The manifest's `winget` entry records the release and each image's before/after version.
+
+Set `install.UpdateWinGet` to `false` in `config.json` to turn it off.
+
 ## Weekly runs
 
 `runner.ps1` customizes every ISO in `InputDirectory` (see `runner-config.json`) one at a

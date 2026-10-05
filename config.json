@@ -17,6 +17,7 @@
     "Format": "esd",
     "ExportWim": true,
     "DefenderUpdate": true,
+    "UpdateWinGet": true,
     "ProfileRules": [
       { "InstallationType": "Server*", "Profile": "plain" },
       { "InstallationType": "Client", "Profile": "client-default" }

@@ -68,6 +68,13 @@ $OfficeEnabled = [bool] (Get-ConfigValue $OfficeConfig 'Enabled' $true)
 $OfficeCache = Get-ConfigValue $OfficeConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\office')
 $OfficeConfiguration = Join-Path $PSScriptRoot '.postinstall\office\configuration.xml'
 
+# current App Installer (WinGet) from microsoft/winget-cli's latest stable release, refreshed
+# once per run and provisioned into every image unless config.json has install.UpdateWinGet = false
+$WinGetConfig = Get-ConfigValue $Config 'WinGet'
+$WinGetEnabled = [bool] (Get-ConfigValue (Get-ConfigValue (Get-Content -Raw $CustomizeConfig | ConvertFrom-Json) 'install') 'UpdateWinGet' $true)
+$WinGetRepository = Get-ConfigValue $WinGetConfig 'Repository' 'microsoft/winget-cli'
+$WinGetCache = Get-ConfigValue $WinGetConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\winget')
+
 # Identify everything that affects the output. If none of it has changed since
 # the last successful build, rebuilding would produce the same ISO.
 function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
@@ -99,6 +106,8 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
     if ($DefenderKit -and $DefenderRebuildOnSignatures) { $Defender += ":$($DefenderKit.Signatures)" }
     $Hashes += $Defender
   }
+  # a new WinGet release rebuilds everything
+  if ($WinGetEnabled) { $Hashes += "winget:$(if ($WinGetKit) { $WinGetKit.Release } else { 'none' })" }
 
   $Bytes = [System.Text.Encoding]::UTF8.GetBytes((@($Source) + $Hashes) -join '|')
   $Sha = [System.Security.Cryptography.SHA256]::Create()
@@ -265,6 +274,102 @@ function Update-DefenderKit {
 
 #endregion
 
+#region winget
+
+# A prepared WinGet kit folder: the msixbundle and x64 dependencies signed by Microsoft,
+# plus the license. Throws otherwise.
+function Get-WinGetKit([string] $Directory) {
+  $Bundle = Join-Path $Directory 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+  $License = @(Get-ChildItem -LiteralPath $Directory -Filter '*License*.xml' -File -ErrorAction SilentlyContinue)
+  $Dependencies = @(Get-ChildItem -LiteralPath (Join-Path $Directory 'x64') -Filter '*.appx' -File -ErrorAction SilentlyContinue)
+  if (-not (Test-Path $Bundle) -or $License.Count -ne 1 -or -not $Dependencies) { throw "$Directory doesn't hold the msixbundle, one license and x64\*.appx dependencies." }
+  foreach ($File in @($Bundle) + @($Dependencies | ForEach-Object FullName)) {
+    if (-not (Test-MicrosoftSignature $File)) { throw "$File is not validly signed by Microsoft; refusing the kit." }
+  }
+  [PSCustomObject]@{ Root = $Directory; Release = "$(Get-Content -Raw (Join-Path $Directory 'release.txt'))".Trim() }
+}
+
+# Refresh the cached kit when the latest stable release on GitHub has a new tag, then
+# return the cached kit (or $null). Downloads are checked against the SHA-256 the
+# release publishes next to them, then for Microsoft signatures, before they replace a
+# good cached kit. Best effort: a failed refresh keeps the cached kit.
+function Update-WinGetKit {
+  $Current = Join-Path $WinGetCache 'current'
+  New-Item -ItemType Directory -Force -Path $WinGetCache | Out-Null
+
+  try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    # /releases/latest skips prereleases
+    $Release = Invoke-RestMethod -Uri "https://api.github.com/repos/$WinGetRepository/releases/latest" -UseBasicParsing -TimeoutSec 120 -Headers @{ 'User-Agent' = 'Customize-WindowsIso' }
+    $Cached = if (Test-Path (Join-Path $Current 'release.txt')) { "$(Get-Content -Raw (Join-Path $Current 'release.txt'))".Trim() }
+
+    if ($Cached -eq $Release.tag_name) {
+      Write-Host "runner: WinGet $Cached is current (published $($Release.published_at))."
+    }
+    else {
+      Write-Host "runner: downloading WinGet $($Release.tag_name) (cached: $(if ($Cached) { $Cached } else { 'none' }))."
+      $New = Join-Path $WinGetCache 'new'
+      if (Test-Path $New) { Remove-Item $New -Recurse -Force }
+      New-Item -ItemType Directory -Force -Path $New | Out-Null
+
+      function Get-Asset([string] $Pattern) {
+        $Asset = @($Release.assets | Where-Object name -like $Pattern)
+        if ($Asset.Count -ne 1) { throw "release $($Release.tag_name) has $($Asset.Count) assets matching '$Pattern'." }
+        $Path = Join-Path $New $Asset[0].name
+        Invoke-WebRequest -Uri $Asset[0].browser_download_url -OutFile $Path -UseBasicParsing -TimeoutSec 1800
+        $Path
+      }
+      function Assert-Sha256([string] $File, [string] $HashFile) {
+        $Expected = "$(Get-Content -Raw $HashFile)".Trim()
+        $Actual = (Get-FileHash -Algorithm SHA256 $File).Hash
+        if ($Actual -ne $Expected) { throw "$(Split-Path -Leaf $File) has SHA-256 $Actual, the release says $Expected." }
+      }
+
+      $Bundle = Get-Asset 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+      Assert-Sha256 $Bundle (Get-Asset 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.txt')
+      $DependencyZip = Get-Asset 'DesktopAppInstaller_Dependencies.zip'
+      Assert-Sha256 $DependencyZip (Get-Asset 'DesktopAppInstaller_Dependencies.txt')
+      Get-Asset '*License1.xml' | Out-Null
+
+      # only the x64 dependencies are kept; the images are amd64
+      $Extract = Join-Path $New 'dependencies'
+      Add-Type -AssemblyName System.IO.Compression.FileSystem
+      [System.IO.Compression.ZipFile]::ExtractToDirectory($DependencyZip, $Extract)
+      Move-Item (Join-Path $Extract 'x64') (Join-Path $New 'x64')
+      Remove-Item $Extract, $DependencyZip -Recurse -Force
+      Get-ChildItem $New -Filter '*.txt' -File | Remove-Item -Force
+      Set-Content -Encoding ascii -NoNewline -Path (Join-Path $New 'release.txt') -Value $Release.tag_name
+
+      # verify before it replaces a good cached kit
+      Get-WinGetKit $New | Out-Null
+      $Old = "$Current.old"
+      if (Test-Path $Old) { Remove-Item $Old -Recurse -Force }
+      if (Test-Path $Current) { Rename-Item $Current (Split-Path -Leaf $Old) }
+      Rename-Item $New (Split-Path -Leaf $Current)
+      if (Test-Path $Old) { Remove-Item $Old -Recurse -Force }
+      Write-Host "runner: WinGet $($Release.tag_name) downloaded and verified."
+    }
+  }
+  catch {
+    Write-Warning "runner: couldn't refresh WinGet from github.com/$($WinGetRepository): $_ Using the cached kit, if any."
+  }
+
+  if (-not (Test-Path $Current)) {
+    Write-Warning "runner: no WinGet kit in $WinGetCache; images keep the App Installer from their media."
+    return
+  }
+  try {
+    $Kit = Get-WinGetKit $Current
+    Write-Host "runner: provisioning WinGet $($Kit.Release)."
+    $Kit
+  }
+  catch {
+    Write-Warning "runner: cached WinGet kit can't be used: $_ Images keep the App Installer from their media."
+  }
+}
+
+#endregion
+
 #region run summary
 
 # Parsed JSON file, or $null if it is missing or unreadable
@@ -364,6 +469,8 @@ try {
   # once per run, before fingerprinting: the kit version is part of the fingerprint
   $DefenderKit = $null
   if ($DefenderEnabled) { $DefenderKit = Update-DefenderKit }
+  $WinGetKit = $null
+  if ($WinGetEnabled) { $WinGetKit = Update-WinGetKit }
 
   # *.previous.iso is a kept copy of an older output, never an input
   $IsoFiles = @(Get-InputImages $Config.InputDirectory)
@@ -434,6 +541,7 @@ try {
     }
     if ($KeepPrevious) { $Arguments += '-KeepPrevious' }
     if ($DefenderKit) { $Arguments += @('-DefenderPackage', "`"$($DefenderKit.Cab)`"") }
+    if ($WinGetKit) { $Arguments += @('-WinGetPackage', "`"$($WinGetKit.Root)`"") }
 
     $Process = Start-Process -FilePath 'powershell.exe' -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
     $Minutes = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)

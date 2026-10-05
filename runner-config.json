@@ -34,5 +34,9 @@
     "CacheDirectory": "Y:\\IsoBuild\\Cache\\defender",
     "RebuildOnSignatureUpdate": false
   },
+  "WinGet": {
+    "Repository": "microsoft/winget-cli",
+    "CacheDirectory": "Y:\\IsoBuild\\Cache\\winget"
+  },
   "LogRetentionDays": 90
 }
