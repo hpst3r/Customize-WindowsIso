@@ -14,7 +14,7 @@
     "DiskPickerMinSizeGB": 50
   },
   "install": {
-    "Format": "wim",
+    "Format": "esd",
     "ExportWim": true,
     "DefenderUpdate": true,
     "Packages": {
