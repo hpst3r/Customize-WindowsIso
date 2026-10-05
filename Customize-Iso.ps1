@@ -45,7 +45,9 @@ param (
   # optional: defender-dism-<arch>.cab from Microsoft's "Defender update for Windows
   # operating system installation images" kit (or the folder holding it). Applied to
   # every image in install.wim unless config.json has install.DefenderUpdate = false.
-  [string] $DefenderPackage
+  [string] $DefenderPackage,
+  # optional: use this profile from config.json for every image instead of install.ProfileRules
+  [string] $ProfileName
 )
 
 # Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
@@ -72,6 +74,9 @@ $script:LoadedHives = [System.Collections.Generic.List[string]]::new()
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
 $script:Removed = [System.Collections.Generic.List[string]]::new()
 $script:DriversAdded = [System.Collections.Generic.List[string]]::new()
+# profiles and rules from config.json (Initialize-InstallProfiles), and the profile each image got
+$script:InstallProfiles = $null
+$script:ImageProfiles = [ordered]@{}
 # enabled driver sets, each with Root/Label/MountedHere once opened (Open-DriverSets)
 $script:DriverSets = @()
 # expanded Defender package (if any), the manifest's "defender" entry, and per-image results
@@ -388,16 +393,21 @@ function Set-InstallImage([string] $InstallWim, $Config) {
     Write-Host "Set-InstallImage: mounting $Label."
 
     $Detail = Get-WindowsImage -ImagePath $InstallWim -Index $Image.ImageIndex
+    $ImageProfile = if ($ProfileName) { $script:InstallProfiles.Profiles[$ProfileName] }
+    else { Select-ImageProfile $script:InstallProfiles (Split-Path -Leaf $IsoPath) $Detail.ImageName $Detail.InstallationType }
+    $script:ImageProfiles[$Label] = $ImageProfile.Name
+    Write-Host "Set-InstallImage: $Label ($($Detail.InstallationType)) uses profile '$($ImageProfile.Name)'."
+
     Mount-Wim -ImageFile $InstallWim -Index $Image.ImageIndex
     $Saved = $false
     try {
       Set-WinRE -ImageRoot $MountDir -ImageLabel $Label -ImageVersion $Detail.Version
 
       Write-Host "Set-InstallImage: removing packages from $Label."
-      Remove-ImagePackages -ImageRoot $MountDir -PackageConfig $Config.install.Packages -ImageLabel $Label
+      Remove-ImagePackages -ImageRoot $MountDir -PackageConfig $ImageProfile.Packages -ImageLabel $Label
 
       Write-Host "Set-InstallImage: applying registry settings to $Label."
-      Set-ImageRegistry -ImageRoot $MountDir -Groups @(Get-ConfigValue $Config.install 'Registry' @())
+      Set-ImageRegistry -ImageRoot $MountDir -Groups @($ImageProfile.Registry)
 
       $OsFolder = Get-DriverOsFolder $Detail.Version $Detail.InstallationType
       Add-DriverSets -ImageRoot $MountDir -Target 'install' -OsFolder $OsFolder -ImageLabel $Label
@@ -1028,6 +1038,12 @@ try {
 
   $IsoPath = (Resolve-Path $IsoPath).Path
   $Config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
+  # profiles: checked up front so a bad config fails before anything is copied or mounted
+  . (Join-Path $PSScriptRoot 'Profiles.ps1')
+  $script:InstallProfiles = Initialize-InstallProfiles $Config
+  if ($ProfileName -and -not $script:InstallProfiles.Profiles.ContainsKey($ProfileName)) {
+    throw "-ProfileName '$ProfileName' is not in config.json (profiles: $(@($script:InstallProfiles.Profiles.Keys | Sort-Object) -join ', '))."
+  }
   if (-not (Test-Path $Autounattend)) { throw "Autounattend file not found: $Autounattend" }
   if ($WinREWimPath -and -not (Test-Path $WinREWimPath)) { throw "WinRE file not found: $WinREWimPath" }
 
@@ -1163,6 +1179,7 @@ try {
     checksum    = $Checksum
     format      = [System.IO.Path]::GetExtension($InstallImage).TrimStart('.')
     images      = @($Images)
+    profiles    = $script:ImageProfiles
     removed     = @($script:Removed)
     virtio      = @($script:DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Label) | Select-Object -First 1
     driverSets  = @($script:DriverSets | ForEach-Object { [PSCustomObject]@{ name = $_.Name; type = $_.Type; path = $_.Path; label = $_.Label; targets = @($_.Targets) } })

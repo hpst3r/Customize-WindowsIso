@@ -73,7 +73,7 @@ function Get-BuildFingerprint([System.IO.FileInfo] $Iso) {
     "file:$($Iso.Length):$($Iso.LastWriteTimeUtc.Ticks)"
   }
 
-  $Inputs = @($BuildScript, (Join-Path $PSScriptRoot 'DriverSets.ps1'), $CustomizeConfig, $Autounattend) +
+  $Inputs = @($BuildScript, (Join-Path $PSScriptRoot 'DriverSets.ps1'), (Join-Path $PSScriptRoot 'Profiles.ps1'), $CustomizeConfig, $Autounattend) +
     @(Get-ChildItem (Join-Path $PSScriptRoot 'stub-scripts') -File -Recurse | Sort-Object FullName | ForEach-Object FullName) +
     # the disk picker's WinPE files (not winpe\tests)
     @(Get-ChildItem (Join-Path $PSScriptRoot 'winpe') -File -ErrorAction SilentlyContinue | Sort-Object FullName | ForEach-Object FullName)

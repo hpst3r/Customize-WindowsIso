@@ -2,8 +2,10 @@
 
 Set of scripts to take a Windows ISO and:
 
-- Remove a short list of consumer AppX packages and deprecated capabilities from **every** edition in `install.wim`
-- Apply offline registry settings (sponsored content, Start/Search suggestions, Widgets, mouse acceleration) from `config.json`
+- Customize **every** edition in `install.wim` according to a profile chosen per edition (see
+  [Profiles](#profiles)): e.g. remove consumer AppX packages and deprecated capabilities and apply
+  offline registry settings (sponsored content, Start/Search suggestions, Widgets) on clients, and
+  leave Windows Server untouched apart from the stub, drivers and Defender update
 - Bypass the Windows 11 TPM / Secure Boot / RAM checks in `boot.wim` (`LabConfig`)
 - Add a very basic `autounattend.xml` that lets the admin run arbitrary PowerShell from removable disks
 - Add stub PowerShell scripts that run further customization after installation (`.postinstall\specialize`, `.postinstall\oobe`)
@@ -30,8 +32,9 @@ It is designed to run weekly after [Get-WindowsIso](https://github.com/hpst3r/Ge
   -OutPath 'Y:\Images\Customized\WindowsServer2025.iso'
 ```
 
-Optional parameters: `-ConfigFile`, `-Autounattend`, `-LogDir`, `-WinREWimPath`, and
-`-DefenderPackage` (see [Microsoft Defender update](#microsoft-defender-update)).
+Optional parameters: `-ConfigFile`, `-Autounattend`, `-LogDir`, `-WinREWimPath`,
+`-DefenderPackage` (see [Microsoft Defender update](#microsoft-defender-update)), and
+`-ProfileName` (use one profile for every edition instead of `install.ProfileRules`).
 `-WinREWimPath` is only used for images that have no WinRE of their own. Get-WindowsIso
 builds keep a WinRE that matches the build, so it is normally not needed.
 
@@ -39,7 +42,7 @@ Outputs, written only after the ISO has been built and verified:
 
 - `<name>.iso`
 - `<name>.iso.sha256.txt`
-- `<name>.iso.json`: images, removed packages, Defender versions, warnings, build time, and the fingerprint used by the runner
+- `<name>.iso.json`: images, the profile each image got, removed packages, Defender versions, warnings, build time, and the fingerprint used by the runner
 
 With `-KeepPrevious` (the runner passes it unless `KeepPrevious` is `false` in
 `runner-config.json`), the ISO being replaced and its sidecars are kept as
@@ -60,23 +63,66 @@ install. With a single edition, Setup installs it without asking.
 
 ## Configuration (`config.json`)
 
-- `install.Packages.AppXPackagesToRemove`: provisioned AppX package names (wildcards allowed)
-- `install.Packages.WindowsCapabilitiesToRemove`: capability names (wildcards allowed)
-- `install.Packages.WindowsPackagesToRemove`: CBS package names (wildcards allowed)
-- `install.Registry`: groups of registry values, each with `Enabled`. `Hive` is one of:
-  - `SOFTWARE`: HKLM\SOFTWARE
-  - `SYSTEM`: HKLM\SYSTEM
-  - `DEFAULTUSER`: the default user profile (`C:\Users\Default\NTUSER.DAT`), copied to every new user
-- `install.Format`: `wim` (default) or `esd`. With `esd`, the serviced image is exported to
-  `sources\install.esd` with LZMS (`recovery`) compression instead of `install.wim`. It is much
-  smaller (and fits FAT32 USB media more easily) but takes much longer to build. Setup uses
-  `install.esd` automatically. The ESD can't be mounted for servicing; export it to a WIM first.
+- `install.Profiles` / `install.ProfileRules`: what is removed and which registry settings are
+  applied, per edition (see [Profiles](#profiles))
+- `install.Format`: `wim` or `esd` (this config uses `esd`). With `esd`, the serviced image is exported to
+  `sources\install.esd` with LZMS (`recovery`) compression instead of `install.wim`: about 20%
+  smaller, but customizing takes roughly 2.5x as long. Setup uses `install.esd` automatically.
+  The ESD can't be mounted for servicing; export it to a WIM first.
 - `install.ExportWim`: with `wim`, re-export `install.wim` after servicing to drop orphaned data (smaller ISO)
 - `install.DefenderUpdate`: apply Microsoft's Defender update to every image (default `true`; see below)
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
 - `iso.DiskPicker` (default `false`): choose the install disk in WinPE instead of wiping disk 0 (below)
 - `iso.DiskPickerMinSizeGB` (default `50`): smallest disk the picker installs to without asking
+
+## Profiles
+
+A profile says what is done to an edition's image:
+
+- `Packages.AppXPackagesToRemove`: provisioned AppX package names (wildcards allowed)
+- `Packages.WindowsCapabilitiesToRemove`: capability names (wildcards allowed)
+- `Packages.WindowsPackagesToRemove`: CBS package names (wildcards allowed)
+- `Registry`: groups of registry values, each with a `Name` and `Enabled`. `Hive` is one of:
+  - `SOFTWARE`: HKLM\SOFTWARE
+  - `SYSTEM`: HKLM\SYSTEM
+  - `DEFAULTUSER`: the default user profile (`C:\Users\Default\NTUSER.DAT`), copied to every new user
+- `Extends`: another profile to start from. Its package patterns are added to; its registry
+  groups are replaced by same-named groups here (e.g. one with `"Enabled": false`) or added to.
+
+Driver sets, the Defender update, the autounattend stub and `boot.LabConfig` apply to every
+image whatever its profile.
+
+This config has three:
+
+| Profile | What it does | Used for |
+|---|---|---|
+| `plain` | Nothing removed, no registry changes | Windows Server (`Server`, `Server Core`) |
+| `client-default` | Ads, consumer and retired apps removed; sponsored content, Start/Search suggestions and Widgets off; mouse acceleration off | Windows 11 |
+| `client-minimal` | `client-default` plus most inbox apps (Camera, Clock, Sticky Notes, Sound Recorder, Media Player, Feedback Hub, Get Help, Quick Assist, Phone Link, Teams, new Outlook, To Do, Power Automate, Xbox components), legacy Media Player and PowerShell ISE; Game DVR off; telemetry at Required | not used by default |
+
+Removing the Xbox identity components in `client-minimal` breaks Xbox/Game Pass sign-in in games.
+
+`install.ProfileRules` picks the profile for each edition: the first rule whose conditions all
+match wins. Conditions are wildcards (case-insensitive) on:
+
+- `IsoName`: the source ISO's file name, e.g. `Windows11Professional,version26H2.iso`
+- `ImageName`: the edition, e.g. `Windows 11 Pro`, `Windows Server 2025 Datacenter`
+- `InstallationType`: `Client`, `Server` (Desktop Experience) or `Server Core`
+
+A rule without conditions matches everything. An edition that no rule matches fails the build
+rather than getting a profile nobody chose. For example, to strip one image harder:
+
+```json
+"ProfileRules": [
+  { "InstallationType": "Server*", "Profile": "plain" },
+  { "IsoName": "*Insider*", "Profile": "client-minimal" },
+  { "InstallationType": "Client", "Profile": "client-default" }
+]
+```
+
+The manifest records the profile each image got. Configs from before profiles (with
+`install.Packages` and `install.Registry`) still work as a single profile for every image.
 
 ## Choosing the install disk (`iso.DiskPicker`)
 
