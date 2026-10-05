@@ -5,6 +5,7 @@
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
+  "PostinstallFolder": "Y:\\Images\\Customized\\postinstall",
   "KeepPrevious": true,
   "BuildIndex": true,
   "DeleteSourceAfterBuild": false,
@@ -24,6 +25,10 @@
       "Enabled": false
     }
   ],
+  "Office": {
+    "Enabled": true,
+    "CacheDirectory": "Y:\\IsoBuild\\Cache\\office"
+  },
   "Defender": {
     "Url": "https://go.microsoft.com/fwlink/?linkid=2144531",
     "CacheDirectory": "Y:\\IsoBuild\\Cache\\defender",

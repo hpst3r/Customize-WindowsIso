@@ -193,6 +193,47 @@ since the first one found wins.
 > The scripts may contain credentials in plain text (e.g. `10-create-user.ps1`), so anyone
 > who can read `postinstall.iso` can read them.
 
+The runner also keeps the ISO's contents as a folder (`PostinstallFolder`, default
+`<OutputDirectory>\postinstall`): `.postinstall`, `office` and `virtio`, ready for the root of a
+USB stick or Ventoy drive. `Copy-PostinstallMedia.ps1` copies them there, mirroring just those
+three folders (only changed files are copied; nothing else on the drive is touched):
+
+```powershell
+.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\
+# or from the ISO; -SkipOffice leaves the 4 GB office\ folder off (machines download Office instead)
+.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall.iso -Destination E:\ -SkipOffice
+```
+
+## Microsoft 365 Apps at first logon
+
+Client images install Microsoft 365 Apps (Office) at first logon, from the post-install media:
+
+- **Weekly**, the runner (`OfficeKit.ps1`) checks Microsoft's release feed for the newest build
+  on the channel in `.postinstall\office\configuration.xml` (Current), and only when it has
+  changed downloads it (about 4 GB, a few minutes) with the Office Deployment Tool into
+  `Office.CacheDirectory`. The build and the ODT's `setup.exe` must be signed by Microsoft. It
+  goes into `postinstall.iso` and the post-install folder as `office\`. A failed download keeps
+  the cached build. Office doesn't affect the images, so a new build doesn't rebuild them.
+- **At first logon**, `.postinstall\oobe\06-start-office-install.ps1` starts the install from
+  `office\` on the post-install drive in the background, so it overlaps the other scripts
+  (WinGet, software), and `y-wait-for-office.ps1` waits for it before the final prompt, so the
+  drive isn't pulled while Office still reads from it. From a local SSD this is the fastest way
+  to install it. Anything missing from `office\` comes from Microsoft's CDN (`AllowCdnFallback`),
+  and without `office\` on any drive, the script downloads the ODT and installs from the CDN.
+  Logs: `%ProgramData%\Customize-WindowsIso\office\logs`.
+- **Which machines**: only images whose profile has the `OfficeOnFirstLogon` registry group
+  (`client-default`, and `client-minimal` through it), which sets
+  `HKLM\SOFTWARE\Customize-WindowsIso\Postinstall` `InstallOffice` = 1. Server images (`plain`)
+  don't have it. To leave Office off a profile, add the group to it with `"Enabled": false`.
+  Machines that already have Office are skipped.
+
+What gets installed is `.postinstall\office\configuration.xml`: 64-bit, Current Channel,
+en-us, Microsoft 365 Apps for enterprise (`O365ProPlusRetail`) without Skype for Business,
+OneDrive (Windows has its own) or the legacy OneDrive for Business sync app, and with updates
+from the CDN. Changing the product ID needs no new download; changing the channel, edition or
+languages makes the next run download again. Turn the download off with `Office.Enabled =
+false` in `runner-config.json`.
+
 ## Driver sets (boot-critical storage and network drivers)
 
 To install onto a disk Windows has no inbox driver for (virtio-scsi, many RAID/NVMe

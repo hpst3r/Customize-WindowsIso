@@ -1,0 +1,31 @@
+<!--
+  Microsoft 365 Apps, Office Deployment Tool configuration.
+
+  One file for both ends:
+  - runner.ps1 (OfficeKit.ps1) downloads the Channel's latest build of this edition and these
+    languages into its cache weekly, for the office\ folder on the post-install media
+  - .postinstall\oobe\06-start-office-install.ps1 installs it at first logon, from office\ on
+    the post-install media when it's there (SourcePath and Version are filled in then), and
+    from Microsoft's CDN otherwise
+
+  Product: O365ProPlusRetail is Microsoft 365 Apps for enterprise (E3/E5, Business Premium
+  with the enterprise app license); O365BusinessRetail is Microsoft 365 Apps for business.
+  The downloaded files are the same for both, so changing it needs no new download.
+  Changing Channel, OfficeClientEdition or the languages makes the next run download again.
+-->
+<Configuration>
+  <Add OfficeClientEdition="64" Channel="Current">
+    <Product ID="O365ProPlusRetail">
+      <Language ID="en-us" />
+      <ExcludeApp ID="Groove" />
+      <ExcludeApp ID="Lync" />
+      <ExcludeApp ID="OneDrive" />
+      <ExcludeApp ID="Bing" />
+    </Product>
+  </Add>
+  <Updates Enabled="TRUE" Channel="Current" />
+  <Property Name="SharedComputerLicensing" Value="0" />
+  <Property Name="FORCEAPPSHUTDOWN" Value="TRUE" />
+  <Property Name="PinIconsToTaskbar" Value="FALSE" />
+  <Display Level="None" AcceptEULA="TRUE" />
+</Configuration>

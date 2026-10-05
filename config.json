@@ -135,6 +135,14 @@
               { "Hive": "DEFAULTUSER", "Key": "Control Panel\\Mouse", "Name": "MouseThreshold1", "Type": "REG_SZ", "Data": "0" },
               { "Hive": "DEFAULTUSER", "Key": "Control Panel\\Mouse", "Name": "MouseThreshold2", "Type": "REG_SZ", "Data": "0" }
             ]
+          },
+          {
+            "Name": "OfficeOnFirstLogon",
+            "Description": "Install Microsoft 365 Apps at first logon: .postinstall\\oobe\\06-start-office-install.ps1 only runs where this is set.",
+            "Enabled": true,
+            "Values": [
+              { "Hive": "SOFTWARE", "Key": "Customize-WindowsIso\\Postinstall", "Name": "InstallOffice", "Type": "REG_DWORD", "Data": 1 }
+            ]
           }
         ]
       },
