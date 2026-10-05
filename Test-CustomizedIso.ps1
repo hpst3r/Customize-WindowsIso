@@ -303,6 +303,17 @@ function Test-InstallImage([string] $Scope, [int] $Index, $ImageProfile) {
       else { Add-Check $Scope 'AppX removed' 'Pass' "none of $($AppxPatterns.Count) configured package(s) among $(@($Provisioned).Count) provisioned" }
     }
   }
+
+  # App Installer (WinGet): the version the manifest says this image was given
+  $WinGet = @(@(Get-ConfigValue (Get-ConfigValue $script:Manifest 'winget') 'images' @()) | Where-Object { $_.image -eq $Scope -and $_.status -in 'updated', 'current' })
+  if ($WinGet) {
+    # not @(Get-ProvisionedAppx): that wraps the returned list as a single element
+    $Provisioned = Get-ProvisionedAppx
+    $Versions = @($Provisioned | Where-Object { $_.PackageName -match '^Microsoft\.DesktopAppInstaller_([^_]+)_' } | ForEach-Object { [version] ($_.PackageName -split '_')[1] } | Sort-Object)
+    $Have = if ($Versions) { $Versions[-1] }
+    $Want = [version] $WinGet[0].after
+    Add-Check $Scope 'App Installer (WinGet)' $(if ($Have -and $Have -ge $Want) { 'Pass' } else { 'Fail' }) "provisioned $(if ($Have) { $Have } else { 'none' }), manifest says $Want"
+  }
   foreach ($Kind in @(
       @{ Key = 'WindowsCapabilitiesToRemove'; Command = '/Get-Capabilities'; Label = 'capabilities removed' },
       @{ Key = 'WindowsPackagesToRemove'; Command = '/Get-Packages'; Label = 'packages removed' })) {

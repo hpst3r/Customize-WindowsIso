@@ -47,7 +47,11 @@ param (
   # every image in install.wim unless config.json has install.DefenderUpdate = false.
   [string] $DefenderPackage,
   # optional: use this profile from config.json for every image instead of install.ProfileRules
-  [string] $ProfileName
+  [string] $ProfileName,
+  # optional: a folder with the current App Installer (WinGet) .msixbundle, its license and
+  # x64\*.appx dependencies (runner.ps1 prepares it from microsoft/winget-cli releases).
+  # Provisioned into every image with AppX unless config.json has install.UpdateWinGet = false.
+  [string] $WinGetPackage
 )
 
 # Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
@@ -83,6 +87,10 @@ $script:DriverSets = @()
 $script:Defender = $null
 $script:DefenderSummary = $null
 $script:DefenderImages = [System.Collections.Generic.List[object]]::new()
+# current App Installer (WinGet) package (if any), the manifest's "winget" entry, and per-image results
+$script:WinGet = $null
+$script:WinGetSummary = $null
+$script:WinGetImages = [System.Collections.Generic.List[object]]::new()
 
 # offline hive files, relative to the root of a mounted image.
 # DEFAULTUSER is the template profile copied for new users. The DEFAULT hive in
@@ -415,6 +423,7 @@ function Set-InstallImage([string] $InstallWim, $Config) {
       Set-WinREDrivers -ImageRoot $MountDir -OsFolder $OsFolder -ImageLabel $Label
 
       if ($script:Defender) { Add-DefenderUpdate -ImageRoot $MountDir -Image $Detail -ImageLabel $Label }
+      if ($script:WinGet) { Add-WinGetUpdate -ImageRoot $MountDir -ImageLabel $Label }
 
       Write-Host "Set-InstallImage: saving $Label."
       Dismount-Wim -Commit
@@ -772,6 +781,100 @@ function Add-DefenderUpdate([string] $ImageRoot, $Image, [string] $ImageLabel) {
 
 #endregion
 
+#region winget
+
+# The inbox App Installer (WinGet) is whatever shipped with the release (e.g. 1.21 on
+# 24H2-based media) until the Store updates it after first sign-in, and old clients
+# fail with "Failed when opening source(s)". Provision the current release from
+# microsoft/winget-cli instead: the .msixbundle, its x64 dependencies and the license.
+
+# Verify the package folder the runner prepared. Returns what it holds, or $null (with a warning).
+function Initialize-WinGetUpdate([string] $Path) {
+  $script:WinGetSummary = [ordered]@{ release = $null; package = $null; source = $Path; images = $script:WinGetImages }
+  if (-not $Path) {
+    Add-BuildWarning 'install.UpdateWinGet is on but no -WinGetPackage was given; images keep the App Installer (WinGet) from the media.'
+    return
+  }
+  try {
+    $Bundle = Join-Path $Path 'Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle'
+    $License = @(Get-ChildItem -LiteralPath $Path -Filter '*License*.xml' -File | ForEach-Object FullName) | Select-Object -First 1
+    $Dependencies = @(Get-ChildItem -LiteralPath (Join-Path $Path 'x64') -Filter '*.appx' -File -ErrorAction SilentlyContinue | ForEach-Object FullName)
+    if (-not (Test-Path -LiteralPath $Bundle) -or -not $License -or -not $Dependencies) { throw "expected the msixbundle, a *License*.xml and x64\*.appx dependencies in $Path." }
+    foreach ($File in @($Bundle) + $Dependencies) {
+      if (-not (Test-MicrosoftSignature $File)) { throw "$File is not validly signed by Microsoft." }
+    }
+
+    # the bundle's own manifest says which App Installer version it provisions
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $Zip = [System.IO.Compression.ZipFile]::OpenRead($Bundle)
+    try {
+      $Reader = New-Object System.IO.StreamReader (($Zip.Entries | Where-Object FullName -eq 'AppxMetadata/AppxBundleManifest.xml').Open())
+      try { [xml] $Manifest = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+    }
+    finally { $Zip.Dispose() }
+    $Client = @($Manifest.Bundle.Packages.Package | Where-Object { $_.Type -eq 'application' -and $_.Architecture -eq 'x64' -and $_.FileName -notlike '*Stub*' })[0].Version
+
+    $Release = Get-Content -Raw -LiteralPath (Join-Path $Path 'release.txt') -ErrorAction SilentlyContinue
+    $Package = [PSCustomObject]@{
+      Bundle       = $Bundle
+      License      = $License
+      Dependencies = $Dependencies
+      Version      = "$($Manifest.Bundle.Identity.Version)"
+      Client       = "$Client"
+      Release      = "$Release".Trim()
+    }
+    $script:WinGetSummary.release = $Package.Release
+    $script:WinGetSummary.package = $Package.Version
+    Write-Host "Initialize-WinGetUpdate: App Installer $($Package.Version) (WinGet $($Package.Client), release $($Package.Release)) with $($Dependencies.Count) dependencies."
+    $Package
+  }
+  catch {
+    Add-BuildWarning "WinGet package $Path can't be used, images keep the App Installer from the media: $_"
+  }
+}
+
+# Version of the provisioned App Installer ($null if none), or 'no-appx' for images without AppX servicing
+function Get-ProvisionedAppInstaller([string] $ImageRoot) {
+  $Result = Invoke-Dism @("/Image:$ImageRoot", '/Get-ProvisionedAppxPackages') -AllowFailure
+  if ($Result.ExitCode -eq 87 -and ($Result.Output -match 'option is unknown')) { return 'no-appx' }
+  if ($Result.ExitCode -ne 0) { throw "Get-ProvisionedAppInstaller: dism failed with exit code $($Result.ExitCode)." }
+  $Names = @($Result.Output | Where-Object { $_ -match '^\s*PackageName\s*:\s*Microsoft\.DesktopAppInstaller_([^_]+)_' } | ForEach-Object { $Matches[1] })
+  if ($Names) { "$(@($Names | ForEach-Object { [version] $_ } | Sort-Object)[-1])" }
+}
+
+# Provision the current App Installer into a mounted image. Not install-critical, so a
+# failure is a build warning (the image keeps its inbox WinGet) rather than a failed build.
+function Add-WinGetUpdate([string] $ImageRoot, [string] $ImageLabel) {
+  $Package = $script:WinGet
+  $Result = [ordered]@{ image = $ImageLabel; status = 'skipped'; before = $null; after = $null }
+  $script:WinGetImages.Add($Result)
+
+  $Before = Get-ProvisionedAppInstaller $ImageRoot
+  if ($Before -eq 'no-appx') { Write-Host "Add-WinGetUpdate: $ImageLabel has no AppX support (e.g. Server Core); skipped."; $Result.status = 'no-appx'; return }
+  $Result.before = $Before
+  if ($Before -and [version] $Before -ge [version] $Package.Version) {
+    Write-Host "Add-WinGetUpdate: $ImageLabel already has App Installer $Before; nothing to do."
+    $Result.status = 'current'; $Result.after = $Before
+    return
+  }
+
+  Write-Host "Add-WinGetUpdate: provisioning App Installer $($Package.Version) (WinGet $($Package.Client)) in $ImageLabel (was $(if ($Before) { $Before } else { 'none' }))."
+  $Arguments = @("/Image:$ImageRoot", '/Add-ProvisionedAppxPackage', "/PackagePath:$($Package.Bundle)", "/LicensePath:$($Package.License)") +
+    @($Package.Dependencies | ForEach-Object { "/DependencyPackagePath:$_" })
+  $Add = Invoke-Dism $Arguments -AllowFailure
+  $After = Get-ProvisionedAppInstaller $ImageRoot
+  $Result.after = $After
+  if ($Add.ExitCode -notin 0, 3010 -or -not $After -or [version] $After -lt [version] $Package.Version) {
+    $Result.status = 'failed'
+    Add-BuildWarning "$($ImageLabel): provisioning App Installer $($Package.Version) failed (dism exit $($Add.ExitCode), provisioned now: $After): $(($Add.Output | Select-Object -Last 4) -join ' | ')"
+    return
+  }
+  $Result.status = 'updated'
+  Write-Host "Add-WinGetUpdate: $ImageLabel now provisions App Installer $After."
+}
+
+#endregion
+
 # $DriverOsFolder: add the driver sets targeting boot, for this OS folder (empty: none)
 function Set-BootImage([string] $BootWim, $BootConfig, [string] $DriverOsFolder) {
   $LabConfig = Get-ConfigValue $BootConfig 'LabConfig'
@@ -1122,6 +1225,8 @@ try {
 
   # Defender update for every image: best effort, so a missing or bad package is a warning
   if (Get-ConfigValue $Config.install 'DefenderUpdate' $true) { $script:Defender = Initialize-DefenderUpdate $DefenderPackage }
+  # current App Installer (WinGet) for every image with AppX: also best effort
+  if (Get-ConfigValue $Config.install 'UpdateWinGet' $true) { $script:WinGet = Initialize-WinGetUpdate $WinGetPackage }
 
   Write-Host 'Customize-Iso: customizing install.wim.'
   # returns the final install image path (install.wim or install.esd)
@@ -1186,6 +1291,7 @@ try {
     drivers     = @($script:DriversAdded)
     diskpicker  = $DiskPicker
     defender    = $script:DefenderSummary
+    winget      = $script:WinGetSummary
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
   } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $ManifestPath
