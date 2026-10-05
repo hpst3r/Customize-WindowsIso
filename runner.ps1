@@ -61,6 +61,13 @@ $DefenderUrl = Get-ConfigValue $DefenderConfig 'Url' 'https://go.microsoft.com/f
 $DefenderCache = Get-ConfigValue $DefenderConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\defender')
 $DefenderRebuildOnSignatures = [bool] (Get-ConfigValue $DefenderConfig 'RebuildOnSignatureUpdate' $false)
 
+# Microsoft 365 Apps for the post-install media (not the images), refreshed once per run
+. (Join-Path $PSScriptRoot 'OfficeKit.ps1')
+$OfficeConfig = Get-ConfigValue $Config 'Office'
+$OfficeEnabled = [bool] (Get-ConfigValue $OfficeConfig 'Enabled' $true)
+$OfficeCache = Get-ConfigValue $OfficeConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\office')
+$OfficeConfiguration = Join-Path $PSScriptRoot '.postinstall\office\configuration.xml'
+
 # current App Installer (WinGet) from microsoft/winget-cli's latest stable release, refreshed
 # once per run and provisioned into every image unless config.json has install.UpdateWinGet = false
 $WinGetConfig = Get-ConfigValue $Config 'WinGet'
@@ -554,11 +561,20 @@ try {
     $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = $Status; Minutes = $Minutes })
   }
 
-  # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM
+  # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM,
+  # and the same tree as a folder (PostinstallFolder) to copy to USB/Ventoy drives
   if (Get-ConfigValue $Config 'BuildPostinstallIso' $true) {
+    # after the images: a new Office build is a multi-GB download
+    $OfficeKit = $null
+    if ($OfficeEnabled) { $OfficeKit = Update-OfficeKit $OfficeCache $OfficeConfiguration }
+
     $PostinstallPath = Join-Path $Config.OutputDirectory 'postinstall.iso'
+    $PostinstallArguments = @{ OutPath = $PostinstallPath; VirtIOIsoPath = $VirtIOIso }
+    if ($OfficeKit) { $PostinstallArguments.OfficePath = $OfficeKit.Root }
+    $PostinstallFolder = Get-ConfigValue $Config 'PostinstallFolder' (Join-Path $Config.OutputDirectory 'postinstall')
+    if ($PostinstallFolder) { $PostinstallArguments.FolderPath = $PostinstallFolder }
     $BuiltBefore = Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built'
-    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') -OutPath $PostinstallPath -VirtIOIsoPath $VirtIOIso
+    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') @PostinstallArguments
     $Status = if ($LASTEXITCODE -ne 0) { "Failed (exit $LASTEXITCODE)" }
     elseif ((Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built') -eq $BuiltBefore) { 'UpToDate' }
     else { 'Built' }

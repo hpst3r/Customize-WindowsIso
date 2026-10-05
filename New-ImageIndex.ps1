@@ -158,8 +158,9 @@ function New-IndexHtml($Index) {
   $Post = if ($Index.postinstall) {
     $P = $Index.postinstall
     "<section class=`"card`"><h2><a href=`"postinstall.iso`">postinstall.iso</a></h2>" +
-    "<p class=`"meta`">$(ConvertTo-Html (@((Format-Size $P.size), "built $(Format-Date $P.built)", "$($P.files.Count) files", $(if ($P.virtio) { "guest tools from $($P.virtio)" })) -ne $null -join ' | '))</p>" +
+    "<p class=`"meta`">$(ConvertTo-Html (@((Format-Size $P.size), "built $(Format-Date $P.built)", "$($P.files.Count) files", $(if ($P.virtio) { "guest tools from $($P.virtio)" }), $(if ($P.office) { "Microsoft 365 Apps $($P.office)" })) -ne $null -join ' | '))</p>" +
     "<p class=`"line dim`">Attach as a second CD-ROM to VMs installed from these ISOs; Setup's post-install scripts run from it.</p>" +
+    $(if ($P.folder) { "<p class=`"line dim`">For USB/Ventoy drives: Copy-PostinstallMedia.ps1 -Source $(ConvertTo-Html (Split-Path -Leaf $P.folder)) (in this share) -Destination &lt;drive&gt;:\</p>" }) +
     (New-ShaLine $P.sha256) +
     (New-ListBlock 'Files' $P.files) + '</section>'
   }
@@ -268,9 +269,11 @@ try {
       file   = 'postinstall.iso'
       size   = (Get-Item $PostinstallPath).Length
       built  = Get-ConfigValue $Manifest 'built'
-      # small enough to hash every time; it has no .sha256.txt
-      sha256 = (Get-FileHash -Algorithm SHA256 $PostinstallPath).Hash.ToLowerInvariant()
+      # New-PostinstallIso records it; ISOs from before that are hashed here
+      sha256 = Get-ConfigValue $Manifest 'sha256' (Get-FileHash -Algorithm SHA256 $PostinstallPath).Hash.ToLowerInvariant()
       virtio = Get-ConfigValue $Manifest 'virtio'
+      office = Get-ConfigValue $Manifest 'office'
+      folder = Get-ConfigValue $Manifest 'folder'
       files  = @(Get-ConfigValue $Manifest 'files' @())
     }
   }
