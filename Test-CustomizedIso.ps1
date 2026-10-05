@@ -270,10 +270,29 @@ function Test-Drivers([string] $Scope, [string[]] $Expected) {
   else { Add-Check $Scope 'drivers' 'Pass' ($Expected -join ', ') }
 }
 
-function Test-InstallImage([string] $Scope, [int] $Index, $Config) {
+# The profile an image should have been built with: the one the manifest records for it,
+# or (older manifests, no manifest) what install.ProfileRules picks now. $null after a
+# Fail check if the recorded profile isn't in config.json any more.
+function Get-ExpectedProfile([string] $Scope, $Detail) {
+  $Recorded = Get-ConfigValue (Get-ConfigValue $script:Manifest 'profiles') $Scope
+  if ($Recorded) {
+    if (-not $script:InstallProfiles.Profiles.ContainsKey($Recorded)) {
+      Add-Check $Scope 'profile' 'Fail' "built with profile '$Recorded', which config.json no longer defines"
+      return $null
+    }
+    Add-Check $Scope 'profile' 'Info' "$Recorded (from the manifest)"
+    return $script:InstallProfiles.Profiles[$Recorded]
+  }
+  $SourceName = Split-Path -Leaf "$(Get-ConfigValue $script:Manifest 'source' $IsoPath)"
+  $Selected = Select-ImageProfile $script:InstallProfiles $SourceName $Detail.ImageName $Detail.InstallationType
+  Add-Check $Scope 'profile' 'Info' "$($Selected.Name) (by install.ProfileRules; not recorded in the manifest)"
+  $Selected
+}
+
+function Test-InstallImage([string] $Scope, [int] $Index, $ImageProfile) {
   Add-Check $Scope 'WinRE' $(if (Test-Path (Join-Path $MountDir 'Windows\System32\Recovery\Winre.wim')) { 'Pass' } else { 'Fail' }) 'Windows\System32\Recovery\Winre.wim'
 
-  $Packages = Get-ConfigValue $Config.install 'Packages'
+  $Packages = $ImageProfile.Packages
   $AppxPatterns = @(Get-ConfigValue $Packages 'AppXPackagesToRemove' @())
   if ($AppxPatterns) {
     $Provisioned = Get-ProvisionedAppx
@@ -295,7 +314,7 @@ function Test-InstallImage([string] $Scope, [int] $Index, $Config) {
     else { Add-Check $Scope $Kind.Label 'Pass' "none of $($Patterns.Count) pattern(s) installed" }
   }
 
-  Test-ImageRegistry $Scope @(Get-ConfigValue $Config.install 'Registry' @())
+  Test-ImageRegistry $Scope @($ImageProfile.Registry)
   Test-Drivers $Scope (Get-ExpectedDrivers $Scope)
 }
 
@@ -347,6 +366,8 @@ try {
   $IsoPath = (Resolve-Path $IsoPath).Path
   $Config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
   $script:Manifest = if ($ManifestPath) { Get-Content -Raw $ManifestPath | ConvertFrom-Json } else { $null }
+  . (Join-Path $PSScriptRoot 'Profiles.ps1')
+  $script:InstallProfiles = Initialize-InstallProfiles $Config
   $script:Dism = Find-Dism
   Write-Host "Test-CustomizedIso: $IsoPath (config $ConfigFile, manifest $(if ($ManifestPath) { $ManifestPath } else { 'none' }), dism $($script:Dism))."
 
@@ -417,9 +438,11 @@ try {
       Invoke-Dism @('/Export-Image', "/SourceImageFile:$InstallImage", "/SourceIndex:$Index", "/DestinationImageFile:$File", '/Compress:fast') | Out-Null
       $Index = 1
     }
+    $ImageProfile = Get-ExpectedProfile $Scope (Get-WindowsImage -ImagePath $InstallImage -Index $Image.ImageIndex)
+    if (-not $ImageProfile) { continue }
     Write-Host "Test-CustomizedIso: mounting $Scope read-only."
     Mount-ReadOnly $File $Index
-    try { Test-InstallImage $Scope $Image.ImageIndex $Config }
+    try { Test-InstallImage $Scope $Image.ImageIndex $ImageProfile }
     finally {
       # a failed unmount must not hide the error that got us here; the final cleanup retries it
       try { Dismount-ReadOnly } catch { Write-Warning "unmount: $_" }
