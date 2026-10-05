@@ -1,8 +1,9 @@
 # Installs the VirtIO guest tools (remaining drivers, QEMU guest agent, SPICE agent) on
 # QEMU/KVM virtual machines. Does nothing on other hardware.
 #
-# Looks for virtio-win-guest-tools.exe in \virtio on any drive (postinstall.iso built by
-# New-PostinstallIso.ps1 -VirtIOIsoPath) or at the root of an attached virtio-win ISO.
+# Looks for virtio-win-guest-tools.exe in \virtio on any drive (postinstall-client.iso or
+# postinstall-server.iso, built by New-PostinstallIso.ps1 -VirtIOIsoPath) or at the root of
+# an attached virtio-win ISO.
 #
 # Upstream builds of the installer are unsigned (the drivers inside are WHQL-signed), so it
 # runs only if it is validly signed, or unsigned and matching the .sha256 file that
@@ -21,7 +22,7 @@ $Installer = Get-PSDrive -PSProvider FileSystem |
   Select-Object -First 1
 
 if (-not $Installer) {
-  Write-Warning 'VirtIO devices found, but virtio-win-guest-tools.exe is not on any drive. Attach postinstall.iso.'
+  Write-Warning 'VirtIO devices found, but virtio-win-guest-tools.exe is not on any drive. Attach postinstall-client.iso or postinstall-server.iso.'
   return
 }
 

@@ -126,7 +126,7 @@ function New-Report($Stages, [bool] $Detailed) {
       $_.Problem -or (Get-ConfigValue $_.Summary 'error') -or
       ((Get-ConfigValue $_.Summary 'exitCode' 0) -ne 0 -and -not @(Get-Items $_ | Where-Object { $_.result -in 'Failed', 'Locked', 'Stale' }).Count)
     })
-  $Rebuilt = @($Runner | ForEach-Object { Get-Items $_ } | Where-Object { $_.result -eq 'Built' -and $_.name -like '*.iso' -and $_.name -ne 'postinstall.iso' })
+  $Rebuilt = @($Runner | ForEach-Object { Get-Items $_ } | Where-Object { $_.result -eq 'Built' -and $_.name -like '*.iso' -and $_.name -notlike 'postinstall*.iso' })
   $NewBuilds = @($Stub | ForEach-Object { Get-Items $_ } | Where-Object result -eq 'Published')
 
   $Outcome = if ($Failed.Count -or $StageProblems.Count) { 'FAILED' } elseif ($Stale.Count) { 'ACTION NEEDED' } else { 'OK' }

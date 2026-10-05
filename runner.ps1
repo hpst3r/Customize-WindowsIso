@@ -67,6 +67,8 @@ $OfficeConfig = Get-ConfigValue $Config 'Office'
 $OfficeEnabled = [bool] (Get-ConfigValue $OfficeConfig 'Enabled' $true)
 $OfficeCache = Get-ConfigValue $OfficeConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\office')
 $OfficeConfiguration = Join-Path $PSScriptRoot '.postinstall\office\configuration.xml'
+# with Office, without (postinstall.iso before the split)
+$PostinstallIsoNames = @('postinstall-client.iso', 'postinstall-server.iso')
 
 # current App Installer (WinGet) from microsoft/winget-cli's latest stable release, refreshed
 # once per run and provisioned into every image unless config.json has install.UpdateWinGet = false
@@ -406,7 +408,7 @@ function ConvertTo-SummaryItem($Row) {
     editions        = @($Images | ForEach-Object { Get-ConfigValue $_ 'Name' })
     built           = Get-ConfigValue $Manifest 'built'
     # the source ISO is gone (deleted after customizing, see DeleteSourceAfterBuild)
-    sourceDeleted   = $Row.Iso -like '*.iso' -and $Row.Iso -ne 'postinstall.iso' -and -not (Test-Path -LiteralPath (Join-Path $Config.InputDirectory $Row.Iso))
+    sourceDeleted   = $Row.Iso -like '*.iso' -and $Row.Iso -notlike 'postinstall*.iso' -and -not (Test-Path -LiteralPath (Join-Path $Config.InputDirectory $Row.Iso))
   }
 }
 
@@ -462,7 +464,7 @@ try {
   foreach ($Set in $DriverSets) {
     Write-Host "runner: driver set '$($Set.Name)' ($($Set.Type)) from $($Set.Path) to $($Set.Targets -join ', ')$(if ($Set.Drivers) { ": $($Set.Drivers -join ', ')" })."
   }
-  # postinstall.iso gets the guest tools from the (first) virtio-win ISO
+  # the post-install ISOs get the guest tools from the (first) virtio-win ISO
   $VirtIOIso = @($DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Path) | Select-Object -First 1
   if (-not $VirtIOIso) { $VirtIOIso = '' }
 
@@ -561,24 +563,29 @@ try {
     $Results.Add([PSCustomObject]@{ Iso = $IsoFile.Name; Status = $Status; Minutes = $Minutes })
   }
 
-  # postinstall.iso: .postinstall on a disk image, to attach to VMs as a second CD-ROM,
-  # and the same tree as a folder (PostinstallFolder) to copy to USB/Ventoy drives
+  # .postinstall on disk images, to attach to VMs as a second CD-ROM: postinstall-client.iso
+  # with Microsoft 365 Apps, postinstall-server.iso without (servers never install it). The
+  # client one's tree is also kept as a folder (PostinstallFolder) to copy to USB/Ventoy drives.
   if (Get-ConfigValue $Config 'BuildPostinstallIso' $true) {
     # after the images: a new Office build is a multi-GB download
     $OfficeKit = $null
     if ($OfficeEnabled) { $OfficeKit = Update-OfficeKit $OfficeCache $OfficeConfiguration }
-
-    $PostinstallPath = Join-Path $Config.OutputDirectory 'postinstall.iso'
-    $PostinstallArguments = @{ OutPath = $PostinstallPath; VirtIOIsoPath = $VirtIOIso }
-    if ($OfficeKit) { $PostinstallArguments.OfficePath = $OfficeKit.Root }
     $PostinstallFolder = Get-ConfigValue $Config 'PostinstallFolder' (Join-Path $Config.OutputDirectory 'postinstall')
-    if ($PostinstallFolder) { $PostinstallArguments.FolderPath = $PostinstallFolder }
-    $BuiltBefore = Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built'
-    & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') @PostinstallArguments
-    $Status = if ($LASTEXITCODE -ne 0) { "Failed (exit $LASTEXITCODE)" }
-    elseif ((Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built') -eq $BuiltBefore) { 'UpToDate' }
-    else { 'Built' }
-    $Results.Add([PSCustomObject]@{ Iso = 'postinstall.iso'; Status = $Status; Minutes = 0 })
+
+    foreach ($Media in @(
+        @{ Name = $PostinstallIsoNames[0]; Office = $true; Folder = $PostinstallFolder },
+        @{ Name = $PostinstallIsoNames[1]; Office = $false; Folder = $null })) {
+      $PostinstallPath = Join-Path $Config.OutputDirectory $Media.Name
+      $PostinstallArguments = @{ OutPath = $PostinstallPath; VirtIOIsoPath = $VirtIOIso }
+      if ($Media.Office -and $OfficeKit) { $PostinstallArguments.OfficePath = $OfficeKit.Root }
+      if ($Media.Folder) { $PostinstallArguments.FolderPath = $Media.Folder }
+      $BuiltBefore = Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built'
+      & (Join-Path $PSScriptRoot 'New-PostinstallIso.ps1') @PostinstallArguments
+      $Status = if ($LASTEXITCODE -ne 0) { "Failed (exit $LASTEXITCODE)" }
+      elseif ((Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built') -eq $BuiltBefore) { 'UpToDate' }
+      else { 'Built' }
+      $Results.Add([PSCustomObject]@{ Iso = $Media.Name; Status = $Status; Minutes = 0 })
+    }
   }
 
   # stale images (source deleted) need someone to act, so they fail the run too

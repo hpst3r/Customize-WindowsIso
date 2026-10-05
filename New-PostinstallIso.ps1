@@ -179,7 +179,8 @@ try {
       virtio      = $VirtIOLabel
       sha256      = (Get-FileHash -Algorithm SHA256 $OutPath).Hash.ToLowerInvariant()
       office      = $OfficeVersion
-      folder      = $(if ($FolderPath) { $FolderPath })
+      # not $(if ...): an empty result serializes as {} instead of null
+      folder      = if ($FolderPath) { $FolderPath } else { $null }
       files       = @($Files | ForEach-Object { ".postinstall$($_.FullName.Substring($Source.Length))" })
     } | ConvertTo-Json -Depth 3 | Set-Content -Encoding utf8 -Path $ManifestPath
 

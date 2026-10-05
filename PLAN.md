@@ -11,9 +11,9 @@ downloads fully-updated ISOs from uupdump, and this repo customizes them. Last u
 | Checkouts the task runs from | `Y:\src\Get-WindowsIso`, `Y:\src\Customize-WindowsIso` (both on `main`) |
 | Weekly task | `Weekly Windows Image Build`, SYSTEM, Wednesdays 01:00: `stub.ps1` → `runner.ps1` → `Send-BuildNotification.ps1` |
 | Source ISOs | `Y:\Images\Standard` |
-| Customized ISOs | `Y:\Images\Customized` (SMB share `Customized`), plus `postinstall.iso`, `index.html`/`index.json` |
+| Customized ISOs | `Y:\Images\Customized` (SMB share `Customized`), plus `postinstall-client.iso` / `postinstall-server.iso`, the `postinstall` folder for USB/Ventoy, `index.html`/`index.json` |
 | Logs | `Y:\IsoBuild\Logs` (customize), `Y:\src\Get-WindowsIso\logs` (download); `last-run-*.json` summaries |
-| Caches | `Y:\IsoBuild\Cache\virtio-win.iso` (updated by hand), `Y:\IsoBuild\Cache\defender` (refreshed by the runner) |
+| Caches | `Y:\IsoBuild\Cache\virtio-win.iso` (updated by hand), `Y:\IsoBuild\Cache\defender`, `winget`, `office` (refreshed by the runner) |
 
 Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2022, Server 2025, Server 2022/2025 Datacenter Core.
 
@@ -22,7 +22,8 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 - **Reliable unattended runs:** builds run one at a time, failures clean up after themselves, an ISO is only replaced after the new one is verified, and unchanged images and builds are skipped.
 - **Every edition customized:** multi-edition media asks which edition to install. The removal list is trimmed to ads, consumer apps and retired apps. Registry settings land in the default user profile.
 - **Driver sets:** VirtIO (vioscsi, viostor, NetKVM) go into Setup, the installed OS and WinRE. Folder sets are available for other boot-critical drivers.
-- **Guest tools:** `postinstall.iso` carries the VirtIO guest tools and installs them silently on VirtIO machines.
+- **Guest tools:** both post-install ISOs carry the VirtIO guest tools and install them silently on VirtIO machines.
+- **Microsoft 365 Apps:** client images install Current Channel Office at first logon from the post-install media (`postinstall-client.iso`, or the folder copied to an SSD), with the CDN as fallback.
 - **Defender:** Microsoft's offline update is applied to every image; a new platform or engine (about monthly) rebuilds.
 - **WinPE disk picker:** built, **off by default** (`iso.DiskPicker`).
 - **Ops:** notifications (ntfy and SMTP relay), keeping the previous ISO, the share index, optional deletion of source ISOs with stale detection, and `Test-CustomizedIso.ps1`.
@@ -51,9 +52,9 @@ Full disk-picker steps are in the README.
 
 ### 2. Automated install test (#1)
 After each weekly run, on the test node:
-1. Boot each new ISO with `postinstall.iso` in a throwaway VM (virtio-scsi, no TPM).
+1. Boot each new ISO with `postinstall-client.iso` or `postinstall-server.iso` in a throwaway VM (virtio-scsi, no TPM).
 2. Wait for the QEMU guest agent.
-3. Check the build, the account, the network, and that the removed apps are absent.
+3. Check the build, the account, the network, that the removed apps are absent, and (clients) that Office installed.
 4. Destroy the VM.
 5. Report through the notification step.
 
