@@ -8,9 +8,10 @@
     the post-install media when it's there (SourcePath and Version are filled in then), and
     from Microsoft's CDN otherwise
 
-  Product: O365ProPlusRetail is Microsoft 365 Apps for enterprise (E3/E5, Business Premium
-  with the enterprise app license); O365BusinessRetail is Microsoft 365 Apps for business.
-  The downloaded files are the same for both, so changing it needs no new download.
+  Product: O365ProPlusRetail (Microsoft 365 Apps for enterprise), the same product WinGet's
+  Microsoft.Office package installs; it switches to Apps for business when a user with a
+  Business license signs in. O365BusinessRetail installs Apps for business directly. The
+  downloaded files are the same for both, so changing it needs no new download.
   Changing Channel, OfficeClientEdition or the languages makes the next run download again.
 -->
 <Configuration>
