@@ -9,11 +9,14 @@
     }
   },
   "iso": {
-    "NoPrompt": true
+    "NoPrompt": true,
+    "DiskPicker": false,
+    "DiskPickerMinSizeGB": 50
   },
   "install": {
     "Format": "wim",
     "ExportWim": true,
+    "DefenderUpdate": true,
     "Packages": {
       "AppXPackagesToRemove": [
         "Clipchamp.Clipchamp",

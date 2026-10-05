@@ -32,7 +32,20 @@ param (
   [string] $OutPath,
   [string] $LogDir,
   # opaque string recorded in the output manifest; runner.ps1 uses it to skip unchanged inputs
-  [string] $Fingerprint
+  [string] $Fingerprint,
+  # move the ISO being replaced (and its sidecars) to <name>.previous.iso instead of deleting it
+  [switch] $KeepPrevious,
+  # optional: a JSON file with "DriverSets": [ ... ] (see DriverSets.ps1), e.g.
+  # runner-config.json. Each set's drivers go into boot.wim, install.wim and/or WinRE.
+  [string] $DriverSetsFile,
+  # optional shorthand for one virtio-iso driver set added to boot, install and winre
+  [string] $VirtIOIsoPath,
+  # comma-separated driver folders from the virtio-win ISO
+  [string] $VirtIODrivers = 'vioscsi,viostor,NetKVM',
+  # optional: defender-dism-<arch>.cab from Microsoft's "Defender update for Windows
+  # operating system installation images" kit (or the folder holding it). Applied to
+  # every image in install.wim unless config.json has install.DefenderUpdate = false.
+  [string] $DefenderPackage
 )
 
 # Windows PowerShell leaves $PSScriptRoot empty while evaluating parameter
@@ -49,6 +62,8 @@ $ProgressPreference = 'SilentlyContinue'
 # working directories
 $ScratchPath = Join-Path $WorkingDir 'Scratch'
 $MountDir = Join-Path $WorkingDir 'Mount'
+# Winre.wim is mounted from inside the mounted install image
+$MountREDir = Join-Path $WorkingDir 'MountRE'
 $DismScratch = Join-Path $WorkingDir 'DismScratch'
 $StagingIso = Join-Path $WorkingDir 'staging.iso'
 
@@ -56,6 +71,13 @@ $StagingIso = Join-Path $WorkingDir 'staging.iso'
 $script:LoadedHives = [System.Collections.Generic.List[string]]::new()
 $script:Warnings = [System.Collections.Generic.List[string]]::new()
 $script:Removed = [System.Collections.Generic.List[string]]::new()
+$script:DriversAdded = [System.Collections.Generic.List[string]]::new()
+# enabled driver sets, each with Root/Label/MountedHere once opened (Open-DriverSets)
+$script:DriverSets = @()
+# expanded Defender package (if any), the manifest's "defender" entry, and per-image results
+$script:Defender = $null
+$script:DefenderSummary = $null
+$script:DefenderImages = [System.Collections.Generic.List[object]]::new()
 
 # offline hive files, relative to the root of a mounted image.
 # DEFAULTUSER is the template profile copied for new users. The DEFAULT hive in
@@ -133,15 +155,15 @@ function Invoke-Dism([string[]] $Arguments, [switch] $AllowFailure) {
 # /Optimize mounts faster but leaves files unhydrated; newer servicing stacks
 # (seen on 29xxx) then fail capability removal with 4350 (ERROR_FILE_OFFLINE).
 # Only use it for images that just get registry edits.
-function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize) {
-  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$MountDir")
+function Mount-Wim([string] $ImageFile, [int] $Index, [switch] $Optimize, [string] $Path = $MountDir) {
+  $Arguments = @('/Mount-Image', "/ImageFile:$ImageFile", "/Index:$Index", "/MountDir:$Path")
   if ($Optimize) { $Arguments += '/Optimize' }
   Invoke-Dism $Arguments | Out-Null
 }
 
-function Dismount-Wim([switch] $Commit) {
+function Dismount-Wim([switch] $Commit, [string] $Path = $MountDir) {
   $Mode = if ($Commit) { '/Commit' } else { '/Discard' }
-  Invoke-Dism @('/Unmount-Image', "/MountDir:$MountDir", $Mode) | Out-Null
+  Invoke-Dism @('/Unmount-Image', "/MountDir:$Path", $Mode) | Out-Null
 }
 
 # dism /Get-ProvisionedAppxPackages prints "Key : Value" blocks separated by blank lines
@@ -293,30 +315,46 @@ function Remove-ImagePackages([string] $ImageRoot, $PackageConfig, [string] $Ima
 #region images
 
 # Dismount any image left mounted under this working directory, discard
-# changes, and drop stale mount points. Safe to call at any time.
+# changes, and drop stale mount points. Safe to call at any time, including
+# while other DISM work (another build, uupdump's converter) runs on this machine.
 function Clear-StaleMounts {
-  foreach ($Image in @(Get-WindowsImage -Mounted)) {
-    if ($Image.Path -like "$($WorkingDir)*") {
-      Write-Host "Clear-StaleMounts: discarding mounted image at $($Image.Path) (status $($Image.MountStatus))."
-      $Result = Invoke-Dism @('/Unmount-Image', "/MountDir:$($Image.Path)", '/Discard') -AllowFailure
-      if ($Result.ExitCode -ne 0) { Write-Warning "Clear-StaleMounts: dismount failed for $($Image.Path): $($Result.Output -join ' | ')" }
-    }
+  $AllMounted = @(Get-WindowsImage -Mounted)
+  $Mounted = @($AllMounted | Where-Object { $_.Path -like "$($WorkingDir)*" })
+  # nested mounts first: Winre.wim in MountRE lives inside the image mounted at Mount
+  $Mounted = @($Mounted | Sort-Object { $Image = $_; -not @($Mounted | Where-Object { $Image.ImagePath -like "$($_.Path)\*" }) })
+  foreach ($Image in $Mounted) {
+    Write-Host "Clear-StaleMounts: discarding mounted image at $($Image.Path) (status $($Image.MountStatus))."
+    $Result = Invoke-Dism @('/Unmount-Image', "/MountDir:$($Image.Path)", '/Discard') -AllowFailure
+    if ($Result.ExitCode -ne 0) { Write-Warning "Clear-StaleMounts: dismount failed for $($Image.Path): $($Result.Output -join ' | ')" }
   }
-  Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
+
+  # /Cleanup-Mountpoints is machine-wide: run mid-commit by another process, it removed
+  # that build's mount record and its save failed (0x80070057). Only run it when
+  # nothing outside this working directory is mounted.
+  $Foreign = @($AllMounted | Where-Object { $_.Path -notlike "$($WorkingDir)*" })
+  if ($Foreign) {
+    Write-Host "Clear-StaleMounts: $($Foreign.Count) other image(s) mounted on this machine; skipping /Cleanup-Mountpoints."
+  }
+  else {
+    Invoke-Dism @('/Cleanup-Mountpoints') -AllowFailure | Out-Null
+  }
+}
+
+# Volume of an attached ISO. The drive letter can take a moment to appear after mounting.
+function Get-IsoVolume($DiskImage, [string] $Path) {
+  for ($i = 0; $i -lt 30; $i++) {
+    $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
+    if ($Volume -and $Volume.DriveLetter) { return $Volume }
+    Start-Sleep -Seconds 1
+  }
+  throw "Get-IsoVolume: $Path mounted but no drive letter was assigned."
 }
 
 # Copy the ISO contents to $Destination. Returns the ISO's volume label.
 function Copy-IsoContents([string] $Path, [string] $Destination) {
   $DiskImage = Mount-DiskImage -ImagePath $Path -StorageType ISO -Access ReadOnly -PassThru
   try {
-    # the drive letter can take a moment to appear after mounting
-    $Volume = $null
-    for ($i = 0; $i -lt 30; $i++) {
-      $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
-      if ($Volume -and $Volume.DriveLetter) { break }
-      Start-Sleep -Seconds 1
-    }
-    if (-not ($Volume -and $Volume.DriveLetter)) { throw "Copy-IsoContents: $Path mounted but no drive letter was assigned." }
+    $Volume = Get-IsoVolume $DiskImage $Path
 
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 
@@ -349,17 +387,24 @@ function Set-InstallImage([string] $InstallWim, $Config) {
     $Label = "[$($Image.ImageIndex)] $($Image.ImageName)"
     Write-Host "Set-InstallImage: mounting $Label."
 
-    $ImageVersion = (Get-WindowsImage -ImagePath $InstallWim -Index $Image.ImageIndex).Version
+    $Detail = Get-WindowsImage -ImagePath $InstallWim -Index $Image.ImageIndex
     Mount-Wim -ImageFile $InstallWim -Index $Image.ImageIndex
     $Saved = $false
     try {
-      Set-WinRE -ImageRoot $MountDir -ImageLabel $Label -ImageVersion $ImageVersion
+      Set-WinRE -ImageRoot $MountDir -ImageLabel $Label -ImageVersion $Detail.Version
 
       Write-Host "Set-InstallImage: removing packages from $Label."
       Remove-ImagePackages -ImageRoot $MountDir -PackageConfig $Config.install.Packages -ImageLabel $Label
 
       Write-Host "Set-InstallImage: applying registry settings to $Label."
       Set-ImageRegistry -ImageRoot $MountDir -Groups @(Get-ConfigValue $Config.install 'Registry' @())
+
+      $OsFolder = Get-DriverOsFolder $Detail.Version $Detail.InstallationType
+      Add-DriverSets -ImageRoot $MountDir -Target 'install' -OsFolder $OsFolder -ImageLabel $Label
+      # before the install image is saved: Winre.wim is a file inside it
+      Set-WinREDrivers -ImageRoot $MountDir -OsFolder $OsFolder -ImageLabel $Label
+
+      if ($script:Defender) { Add-DefenderUpdate -ImageRoot $MountDir -Image $Detail -ImageLabel $Label }
 
       Write-Host "Set-InstallImage: saving $Label."
       Dismount-Wim -Commit
@@ -428,25 +473,321 @@ function Set-WinRE([string] $ImageRoot, [string] $ImageLabel, [version] $ImageVe
   Copy-Item $WinREWimPath $Target -Force
 }
 
-function Set-BootImage([string] $BootWim, $BootConfig) {
-  $LabConfig = Get-ConfigValue $BootConfig 'LabConfig'
-  $Values = @(if ($LabConfig) { $LabConfig.PSObject.Properties | Where-Object { $_.Value } })
-  if (-not $Values) { Write-Host 'Set-BootImage: no LabConfig bypasses enabled; leaving boot.wim alone.'; return }
+#region drivers
 
-  $Index = Get-SetupBootIndex $BootWim
-  Write-Host "Set-BootImage: mounting boot.wim index $Index to set LabConfig ($($Values.Name -join ', '))."
+# OS folder for driver sets, as on the virtio-win ISO: <driver>\<w11|w10|2k25|2k22|2k19>\amd64
+function Get-DriverOsFolder([version] $Version, [string] $InstallationType) {
+  if ($InstallationType -like 'Server*') {
+    if ($Version.Build -ge 26100) { return '2k25' }
+    if ($Version.Build -ge 20348) { return '2k22' }
+    return '2k19'
+  }
+  if ($Version.Build -ge 22000) { return 'w11' }
+  'w10'
+}
 
-  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
-  $Saved = $false
-  try {
-    $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
-    try {
-      foreach ($Value in $Values) {
-        Invoke-Native reg.exe @('add', "$Hive\Setup\LabConfig", '/v', $Value.Name, '/t', 'REG_DWORD', '/d', '1', '/f') | Out-Null
+# enabled driver sets that add drivers to $Target (boot, install, winre)
+function Get-TargetDriverSets([string] $Target) {
+  @($script:DriverSets | Where-Object { $_.Targets -contains $Target })
+}
+
+# Attach virtio-win ISOs (unless they already are) and note each set's root
+function Open-DriverSets {
+  foreach ($Set in $script:DriverSets) {
+    $Set | Add-Member -NotePropertyMembers @{ Root = $null; Label = $Set.Name; MountedHere = $false; PerOs = $false }
+    if ($Set.Type -eq 'virtio-iso') {
+      $DiskImage = Get-DiskImage -ImagePath $Set.Path
+      if (-not $DiskImage.Attached) {
+        $DiskImage = Mount-DiskImage -ImagePath $Set.Path -StorageType ISO -Access ReadOnly -PassThru
+        $Set.MountedHere = $true
+      }
+      $Volume = Get-IsoVolume $DiskImage $Set.Path
+      $Set.Root = "$($Volume.DriveLetter):\"
+      $Set.Label = $Volume.FileSystemLabel
+      $Detail = "$($Set.Label) at $($Set.Root), drivers $($Set.Drivers -join ', ')"
+    }
+    else {
+      $Set.Root = $Set.Path
+      # per-OS layout: <Path>\<w11|2k22|...>, used instead of the whole folder
+      $Set.PerOs = [bool](@(Get-ChildItem -LiteralPath $Set.Path -Directory | Where-Object { $DriverOsFolders -contains $_.Name }).Count)
+      $Detail = if ($Set.PerOs) { 'per-OS subfolders' } else { 'whole folder' }
+    }
+    Write-Host "Open-DriverSets: '$($Set.Name)' ($($Set.Type)) from $($Set.Path): $Detail; targets $($Set.Targets -join ', ')."
+  }
+}
+
+function Close-DriverSets {
+  foreach ($Set in @($script:DriverSets | Where-Object { $_.PSObject.Properties['MountedHere'] -and $_.MountedHere })) {
+    try { Dismount-DiskImage -ImagePath $Set.Path | Out-Null; $Set.MountedHere = $false } catch { Write-Warning "cleanup: $_" }
+  }
+}
+
+# Add the drivers of every set targeting $Target to a mounted image.
+# A missing driver folder is a warning; a DISM failure (e.g. unsigned driver) fails the build.
+function Add-DriverSets([string] $ImageRoot, [string] $Target, [string] $OsFolder, [string] $ImageLabel) {
+  foreach ($Set in (Get-TargetDriverSets $Target)) {
+    if ($Set.Type -eq 'virtio-iso') {
+      foreach ($Driver in $Set.Drivers) {
+        $Path = Join-Path $Set.Root "$Driver\$OsFolder\amd64"
+        if (-not (Test-Path $Path)) {
+          Add-BuildWarning "$($ImageLabel): $($Set.Name) ($($Set.Label)) has no $Driver\$OsFolder\amd64; driver not added."
+          continue
+        }
+        Write-Host "Add-DriverSets: adding $($Set.Name) $Driver ($OsFolder) to $ImageLabel."
+        Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path") | Out-Null
+        $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Driver\$OsFolder")
+      }
+      continue
+    }
+
+    $Path = $Set.Root
+    if ($Set.PerOs) {
+      $Path = Join-Path $Set.Root $OsFolder
+      if (-not (Test-Path -LiteralPath $Path)) {
+        Add-BuildWarning "$($ImageLabel): driver set $($Set.Name) has no $OsFolder subfolder; drivers not added."
+        continue
       }
     }
+    Write-Host "Add-DriverSets: adding $($Set.Name) ($Path, recursive) to $ImageLabel."
+    $Result = Invoke-Dism @("/Image:$ImageRoot", '/Add-Driver', "/Driver:$Path", '/Recurse')
+    # "Installing 1 of 3 - <path>\x.inf: The driver package was successfully installed."
+    $Infs = @($Result.Output | ForEach-Object { if ($_ -match '^Installing \d+ of \d+ - (.+?\.inf): ') { $Matches[1] } })
+    foreach ($Inf in $Infs) {
+      $Relative = if ($Inf.StartsWith($Set.Root, [System.StringComparison]::OrdinalIgnoreCase)) { $Inf.Substring($Set.Root.Length).TrimStart('\') } else { $Inf }
+      $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Relative")
+    }
+    if (-not $Infs) { $script:DriversAdded.Add("$($ImageLabel): $($Set.Name) $Path") }
+  }
+}
+
+# Add the driver sets targeting winre to the Winre.wim inside a mounted install
+# image. Runs before the install image is saved; Winre.wim is mounted to a second
+# mount directory and must be dismounted before the install image is.
+function Set-WinREDrivers([string] $ImageRoot, [string] $OsFolder, [string] $ImageLabel) {
+  if (-not (Get-TargetDriverSets 'winre')) { return }
+
+  $Winre = Join-Path $ImageRoot 'Windows\System32\Recovery\Winre.wim'
+  if (-not (Test-Path -LiteralPath $Winre)) {
+    Add-BuildWarning "$($ImageLabel): no Windows\System32\Recovery\Winre.wim; drivers not added to WinRE."
+    return
+  }
+  $Label = "$ImageLabel WinRE"
+
+  # Winre.wim is hidden+system; make sure it is writable and put the attributes back after
+  $Item = Get-Item -LiteralPath $Winre -Force
+  $Attributes = $Item.Attributes
+  $SizeBefore = $Item.Length
+  $Item.Attributes = 'Normal'
+  try {
+    New-Item -ItemType Directory -Force -Path $MountREDir | Out-Null
+    Write-Host "Set-WinREDrivers: mounting $Label."
+    Mount-Wim -ImageFile $Winre -Index 1 -Path $MountREDir
+    $Saved = $false
+    try {
+      Add-DriverSets -ImageRoot $MountREDir -Target 'winre' -OsFolder $OsFolder -ImageLabel $Label
+      Dismount-Wim -Commit -Path $MountREDir
+      $Saved = $true
+    }
     finally {
-      Dismount-OfflineHive $Hive
+      if (-not $Saved) {
+        Write-Warning "Set-WinREDrivers: discarding changes to $Label."
+        try { Dismount-Wim -Path $MountREDir } catch { Write-Warning "Set-WinREDrivers: discard failed: $_" }
+      }
+    }
+
+    # saving appends to the WIM; a fresh export drops the orphaned data
+    $SizeSaved = (Get-Item -LiteralPath $Winre -Force).Length
+    $Exported = Join-Path $WorkingDir 'winre.export.wim'
+    if (Test-Path $Exported) { Remove-Item $Exported -Force }
+    Invoke-Dism @('/Export-Image', "/SourceImageFile:$Winre", '/SourceIndex:1', "/DestinationImageFile:$Exported", '/Compress:max') | Out-Null
+    Copy-Item $Exported $Winre -Force
+    Remove-Item $Exported -Force
+    Write-Host "Set-WinREDrivers: $Label is $([math]::Round((Get-Item -LiteralPath $Winre -Force).Length / 1MB)) MB (was $([math]::Round($SizeBefore / 1MB)) MB; $([math]::Round($SizeSaved / 1MB)) MB before export)."
+  }
+  finally {
+    (Get-Item -LiteralPath $Winre -Force).Attributes = $Attributes
+  }
+}
+
+#endregion
+
+#region defender
+
+# Microsoft's "Defender update for Windows operating system installation images"
+# kit is defender-dism-<arch>.cab plus DefenderUpdateWinImage.ps1. The script
+# mounts the WIM itself with the DISM cmdlets (in-process, see Find-Dism), but
+# inside the image all it does is copy the cab's Platform and Definition
+# Updates folders into ProgramData\Microsoft\Windows Defender, drop
+# package-defender.xml into Windows\Temp, and enable Windows-Defender on Server.
+# The same is done here to the image that is already mounted.
+
+# true if $Path has a valid Authenticode signature from Microsoft, chaining to a Microsoft root
+function Test-MicrosoftSignature([string] $Path) {
+  $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+  if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(^|, )O=Microsoft Corporation(,|$)') { return $false }
+  $Chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+  $Chain.ChainPolicy.RevocationMode = 'NoCheck'
+  try {
+    $Chain.Build($Signature.SignerCertificate) | Out-Null
+    $Root = $Chain.ChainElements[$Chain.ChainElements.Count - 1].Certificate
+    $Root.Subject -match '^CN=Microsoft Root Certificate Authority'
+  }
+  finally { $Chain.Dispose() }
+}
+
+# Verify and expand the package. Returns what it contains, or $null (with a warning) if it can't be used.
+function Initialize-DefenderUpdate([string] $Path) {
+  $script:DefenderSummary = [ordered]@{ package = $null; platform = $null; engine = $null; signatures = $null; source = $Path; images = $script:DefenderImages }
+  if (-not $Path) {
+    Add-BuildWarning 'install.DefenderUpdate is on but no -DefenderPackage was given; images keep the Defender platform and definitions from the media.'
+    return
+  }
+  try {
+    $Cab = $Path
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+      $Cab = @(Get-ChildItem -LiteralPath $Path -Filter 'defender-dism-*.cab' -File | ForEach-Object FullName) | Select-Object -First 1
+      if (-not $Cab) { throw "no defender-dism-*.cab in $Path." }
+    }
+    if (-not (Test-Path -LiteralPath $Cab -PathType Leaf)) { throw "$Cab not found." }
+    if (-not (Test-MicrosoftSignature $Cab)) { throw "$Cab is not validly signed by Microsoft." }
+
+    $Root = Join-Path $WorkingDir 'DefenderPackage'
+    if (Test-Path $Root) { Remove-Item $Root -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    Invoke-Native expand.exe @($Cab, '-F:*', $Root) | Out-Null
+
+    [xml] $Xml = Get-Content -Raw -LiteralPath (Join-Path $Root 'package-defender.xml')
+    $Platform = @(Get-ChildItem (Join-Path $Root 'Platform') -Directory)
+    if ($Platform.Count -ne 1 -or -not (Test-Path (Join-Path $Root 'Definition Updates\Updates\mpengine.dll'))) { throw "unexpected layout in $Cab." }
+
+    $Package = [PSCustomObject]@{
+      Root       = $Root
+      Arch       = "$($Xml.packageinfo.arch)"
+      Package    = "$($Xml.packageinfo.versions.defender)"
+      Platform   = "$($Xml.packageinfo.versions.platform)"
+      Engine     = "$($Xml.packageinfo.versions.engine)"
+      Signatures = "$($Xml.packageinfo.versions.signatures)"
+    }
+    foreach ($Name in 'package', 'platform', 'engine', 'signatures') { $script:DefenderSummary[$Name] = $Package.$Name }
+    Write-Host "Initialize-DefenderUpdate: $Cab is package $($Package.Package) ($($Package.Arch)): platform $($Package.Platform), engine $($Package.Engine), security intelligence $($Package.Signatures)."
+    $Package
+  }
+  catch {
+    Add-BuildWarning "Defender update package $Path can't be used, images keep the Defender version from the media: $_"
+  }
+}
+
+# highest file version among the files that exist, as a string ($null if none)
+function Get-MaxFileVersion([string[]] $Paths) {
+  $Versions = @(foreach ($Path in $Paths) {
+      if (Test-Path -LiteralPath $Path) {
+        $Info = (Get-Item -LiteralPath $Path).VersionInfo
+        [version] ('{0}.{1}.{2}.{3}' -f $Info.FileMajorPart, $Info.FileMinorPart, $Info.FileBuildPart, $Info.FilePrivatePart)
+      }
+    })
+  if ($Versions) { "$(@($Versions | Sort-Object)[-1])" }
+}
+
+# Defender versions an image will start with: the newest platform (inbox or under
+# ProgramData\...\Platform), engine and security intelligence (Default = inbox, Updates = kit)
+function Get-ImageDefenderVersion([string] $ImageRoot) {
+  $Data = Join-Path $ImageRoot 'ProgramData\Microsoft\Windows Defender'
+  $Definitions = @('Default', 'Updates' | ForEach-Object { Join-Path $Data "Definition Updates\$_" })
+  [PSCustomObject]@{
+    platform   = Get-MaxFileVersion (@(Join-Path $ImageRoot 'Program Files\Windows Defender\MsMpEng.exe') +
+      @(Get-ChildItem (Join-Path $Data 'Platform') -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'MsMpEng.exe' }))
+    engine     = Get-MaxFileVersion @($Definitions | ForEach-Object { Join-Path $_ 'mpengine.dll' })
+    signatures = Get-MaxFileVersion @($Definitions | ForEach-Object { Join-Path $_ 'mpavdlta.vdm' })
+  }
+}
+
+# Apply the Defender package to a mounted image. Images the kit doesn't support
+# are skipped with a warning; a failure while copying fails the build, so a
+# half-copied platform folder is never committed.
+function Add-DefenderUpdate([string] $ImageRoot, $Image, [string] $ImageLabel) {
+  $Package = $script:Defender
+  $Before = Get-ImageDefenderVersion $ImageRoot
+  $Result = [ordered]@{ image = $ImageLabel; status = 'skipped'; before = $Before; after = $null }
+  $script:DefenderImages.Add($Result)
+
+  # the kit's own checks: matching architecture, Windows 10 1607 (with the September 2018 update) or later
+  $Arch = switch ([int] $Image.Architecture) { 0 { 'x86' } 9 { 'amd64' } 12 { 'arm64' } default { "unknown ($_)" } }
+  $Version = [version] $Image.Version
+  $MinimumRevision = @{ 14393 = 2515; 15063 = 1356; 16299 = 699; 17134 = 320 }
+  $Supported = $Version.Major -gt 10 -or ($Version.Major -eq 10 -and ($Version.Minor -gt 0 -or $Version.Build -ge 17763 -or
+      ($MinimumRevision.ContainsKey($Version.Build) -and $Version.Revision -ge $MinimumRevision[$Version.Build])))
+  if ($Package.Arch -notlike "$Arch*") { Add-BuildWarning "$($ImageLabel): Defender package is $($Package.Arch), image is $Arch; Defender not updated."; return }
+  if (-not $Supported) { Add-BuildWarning "$($ImageLabel): Defender update kit doesn't support Windows $Version; Defender not updated."; return }
+
+  $Wanted = [PSCustomObject]@{ platform = $Package.Platform; engine = $Package.Engine; signatures = $Package.Signatures }
+  if (-not @('platform', 'engine', 'signatures' | Where-Object { -not $Before.$_ -or [version] $Before.$_ -lt [version] $Wanted.$_ })) {
+    Write-Host "Add-DefenderUpdate: $ImageLabel already has Defender $($Package.Package) or newer; nothing to do."
+    $Result.status = 'current'
+    $Result.after = $Before
+    return
+  }
+
+  # Server: Defender is an optional feature; the kit enables it if it is off
+  if ($Image.InstallationType -like 'Server*') {
+    $Feature = Invoke-Dism @("/Image:$ImageRoot", '/Get-FeatureInfo', '/FeatureName:Windows-Defender') -AllowFailure
+    $State = @($Feature.Output | Where-Object { $_ -match '^\s*State\s*:\s*(\S+)' } | ForEach-Object { $Matches[1] })
+    if ($Feature.ExitCode -ne 0 -or -not $State) { Add-BuildWarning "$($ImageLabel): no Windows-Defender feature in this image; Defender not updated."; return }
+    if ($State[0] -ne 'Enabled') {
+      Write-Host "Add-DefenderUpdate: enabling Windows-Defender in $ImageLabel (was $($State[0]))."
+      $Enable = Invoke-Dism @("/Image:$ImageRoot", '/Enable-Feature', '/FeatureName:Windows-Defender') -AllowFailure
+      if ($Enable.ExitCode -notin 0, 3010) { Add-BuildWarning "$($ImageLabel): enabling Windows-Defender failed (exit $($Enable.ExitCode)); Defender not updated."; return }
+    }
+  }
+
+  Write-Host "Add-DefenderUpdate: updating Defender in $ImageLabel from platform $($Before.platform), engine $($Before.engine), security intelligence $($Before.signatures)."
+  $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $Data = Join-Path $ImageRoot 'ProgramData\Microsoft\Windows Defender'
+  # new files inherit Defender's ACLs from the destination folders, as with the kit's Copy-Item
+  foreach ($Folder in 'Definition Updates\Updates', 'Platform') {
+    Invoke-Native robocopy.exe @((Join-Path $Package.Root $Folder), (Join-Path $Data $Folder), '/E', '/R:3', '/W:5', '/NP', '/NFL', '/NDL') -SuccessExitCodes (0..7) | Out-Null
+  }
+  Copy-Item (Join-Path $Package.Root 'package-defender.xml') (Join-Path $ImageRoot 'Windows\Temp') -Force
+
+  # check what landed rather than trusting the copy
+  $After = Get-ImageDefenderVersion $ImageRoot
+  $Result.after = $After
+  foreach ($Name in 'platform', 'engine', 'signatures') {
+    if (-not $After.$Name -or [version] $After.$Name -lt [version] $Wanted.$Name) {
+      throw "Add-DefenderUpdate: $ImageLabel has $Name $($After.$Name) after the update, expected $($Wanted.$Name)."
+    }
+  }
+  $Result.status = 'updated'
+  Write-Host "Add-DefenderUpdate: $ImageLabel now has platform $($After.platform), engine $($After.engine), security intelligence $($After.signatures) ($([math]::Round($Stopwatch.Elapsed.TotalSeconds)) s)."
+}
+
+#endregion
+
+# $DriverOsFolder: add the driver sets targeting boot, for this OS folder (empty: none)
+function Set-BootImage([string] $BootWim, $BootConfig, [string] $DriverOsFolder) {
+  $LabConfig = Get-ConfigValue $BootConfig 'LabConfig'
+  $Values = @(if ($LabConfig) { $LabConfig.PSObject.Properties | Where-Object { $_.Value } })
+  if (-not $Values -and -not $DriverOsFolder) { Write-Host 'Set-BootImage: no LabConfig bypasses or drivers to add; leaving boot.wim alone.'; return }
+
+  $Index = Get-SetupBootIndex $BootWim
+  Write-Host "Set-BootImage: mounting boot.wim index $Index (LabConfig: $($Values.Name -join ', '); drivers: $DriverOsFolder)."
+
+  # adding drivers needs a full mount; a registry edit alone doesn't
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize:(-not $DriverOsFolder)
+  $Saved = $false
+  try {
+    if ($Values) {
+      $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
+      try {
+        foreach ($Value in $Values) {
+          Invoke-Native reg.exe @('add', "$Hive\Setup\LabConfig", '/v', $Value.Name, '/t', 'REG_DWORD', '/d', '1', '/f') | Out-Null
+        }
+      }
+      finally {
+        Dismount-OfflineHive $Hive
+      }
+    }
+    if ($DriverOsFolder) {
+      Add-DriverSets -ImageRoot $MountDir -Target 'boot' -OsFolder $DriverOsFolder -ImageLabel "boot.wim[$Index]"
     }
     Dismount-Wim -Commit
     $Saved = $true
@@ -465,20 +806,106 @@ function Set-BootImage([string] $BootWim, $BootConfig) {
 # Copy autounattend.xml to the media. When install.wim has several images the
 # hard-coded /IMAGE/INDEX is removed so Setup asks which edition to install
 # instead of silently installing index 1.
-function Set-Unattend([string] $Source, [string] $MediaRoot, [int] $ImageCount) {
+# With $DiskPickerDir (iso.DiskPicker), the media copy loses its disk settings, so
+# Setup asks for a disk if it is ever started without the picker, and the answer
+# file the picker hands to Setup is written to $DiskPickerDir in two halves split
+# where <InstallTo> goes (see winpe\diskpicker.cmd).
+function Set-Unattend([string] $Source, [string] $MediaRoot, [int] $ImageCount, [string] $DiskPickerDir) {
   $Destination = Join-Path $MediaRoot 'autounattend.xml'
   [xml] $Xml = Get-Content -Raw -Path $Source
+  $Ns = New-Object System.Xml.XmlNamespaceManager $Xml.NameTable
+  $Ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
 
   if ($ImageCount -gt 1) {
-    $Ns = New-Object System.Xml.XmlNamespaceManager $Xml.NameTable
-    $Ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
     foreach ($Node in @($Xml.SelectNodes('//u:ImageInstall/u:OSImage/u:InstallFrom', $Ns))) {
       Write-Host "Set-Unattend: $ImageCount images in install.wim - removing InstallFrom so Setup prompts for the edition."
       $Node.ParentNode.RemoveChild($Node) | Out-Null
     }
   }
 
+  if ($DiskPickerDir) {
+    $SetupPath = "//u:settings[@pass='windowsPE']/u:component[@name='Microsoft-Windows-Setup']"
+    $OSImage = @($Xml.SelectNodes("$SetupPath/u:ImageInstall/u:OSImage", $Ns))
+    if ($OSImage.Count -ne 1) { throw "Set-Unattend: the disk picker needs one windowsPE Microsoft-Windows-Setup ImageInstall/OSImage in $Source, found $($OSImage.Count)." }
+    # the picker partitions the disk itself
+    Write-Host 'Set-Unattend: disk picker - removing DiskConfiguration and InstallTo; the picker sets the target disk at install time.'
+    foreach ($Node in @($Xml.SelectNodes("$SetupPath/u:DiskConfiguration", $Ns)) + @($OSImage[0].SelectNodes('u:InstallTo | u:InstallToAvailablePartition', $Ns))) {
+      $Node.ParentNode.RemoveChild($Node) | Out-Null
+    }
+  }
+
   $Xml.Save($Destination)
+
+  if ($DiskPickerDir) {
+    $Marker = '@@DISKPICKER_INSTALLTO@@'
+    $InstallTo = $Xml.CreateElement('InstallTo', 'urn:schemas-microsoft-com:unattend')
+    $InstallTo.InnerText = $Marker
+    $OSImage[0].AppendChild($InstallTo) | Out-Null
+    $Template = Join-Path $DiskPickerDir 'unattend-template.xml'
+    $Xml.Save($Template)
+    $Parts = @([IO.File]::ReadAllText($Template) -split [regex]::Escape($Marker))
+    if ($Parts.Count -ne 2) { throw "Set-Unattend: could not split the disk picker answer file at its InstallTo." }
+    # the halves are joined with cmd's copy /b, so no BOM in the second half
+    $Utf8 = New-Object System.Text.UTF8Encoding $false
+    [IO.File]::WriteAllText((Join-Path $DiskPickerDir 'unattend-head.xml'), $Parts[0], $Utf8)
+    [IO.File]::WriteAllText((Join-Path $DiskPickerDir 'unattend-tail.xml'), $Parts[1], $Utf8)
+    Remove-Item $Template
+  }
+}
+
+# The disk picker (iso.DiskPicker): put winpe\diskpicker.cmd and the answer file
+# halves from Set-Unattend into the Setup image of boot.wim, and start it from
+# winpeshl.ini. The Setup image's shell is winpeshl.exe, which runs winpeshl.ini
+# when there is one and X:\setup.exe otherwise; the picker runs Setup itself.
+# Separate from Set-BootImage at the cost of a second mount, so that neither
+# needs to know about the other.
+function Add-DiskPicker([string] $BootWim, [string] $StagingDir, [int] $MinSizeGB) {
+  $Source = Join-Path $PSScriptRoot 'winpe'
+  # cmd.exe needs CRLF line endings and no BOM, whatever git did to the checkout
+  foreach ($Name in 'diskpicker.cmd', 'winpeshl.ini') {
+    $Text = [IO.File]::ReadAllText((Join-Path $Source $Name)) -replace "`r?`n", "`r`n"
+    if ($Text -match '[^\x00-\x7F]') { throw "Add-DiskPicker: winpe\$Name must be plain ASCII." }
+    [IO.File]::WriteAllText((Join-Path $StagingDir $Name), $Text, [System.Text.Encoding]::ASCII)
+  }
+  [IO.File]::WriteAllText((Join-Path $StagingDir 'settings.cmd'), "set `"DP_MIN_GB=$MinSizeGB`"`r`n", [System.Text.Encoding]::ASCII)
+
+  $Index = Get-SetupBootIndex $BootWim
+  Write-Host "Add-DiskPicker: adding the disk picker to boot.wim index $Index (automatic install when exactly one disk has $MinSizeGB GB or more)."
+  Mount-Wim -ImageFile $BootWim -Index $Index -Optimize
+  $Saved = $false
+  try {
+    $System32 = Join-Path $MountDir 'Windows\System32'
+    foreach ($Required in 'winpeshl.exe', 'diskpart.exe', 'wpeutil.exe', 'reg.exe') {
+      if (-not (Test-Path (Join-Path $System32 $Required))) { throw "Add-DiskPicker: boot.wim[$Index] has no $Required." }
+    }
+    if (-not (Test-Path (Join-Path $MountDir 'setup.exe')) -and -not (Test-Path (Join-Path $MountDir 'sources\setup.exe'))) {
+      throw "Add-DiskPicker: boot.wim[$Index] has no setup.exe."
+    }
+    if (Test-Path (Join-Path $System32 'winpeshl.ini')) { throw "Add-DiskPicker: boot.wim[$Index] already has a winpeshl.ini." }
+
+    # without winpeshl.exe as the shell, winpeshl.ini is never read and Setup starts
+    # as usual - showing its disk page, since the media answer file has no disk
+    $Hive = Mount-OfflineHive $MountDir 'SYSTEM'
+    try { $Shell = "$((Invoke-Native reg.exe @('query', "$Hive\Setup", '/v', 'CmdLine') -AllowFailure).Output)" }
+    finally { Dismount-OfflineHive $Hive }
+    if ($Shell -notmatch 'winpeshl\.exe') {
+      Add-BuildWarning "boot.wim[$Index]: the shell is not winpeshl.exe ($Shell), so the disk picker won't run; Setup will ask for the disk."
+    }
+
+    $Target = Join-Path $MountDir 'DiskPicker'
+    New-Item -ItemType Directory -Force -Path $Target | Out-Null
+    foreach ($Name in 'diskpicker.cmd', 'settings.cmd', 'unattend-head.xml', 'unattend-tail.xml') {
+      Copy-Item (Join-Path $StagingDir $Name) $Target
+    }
+    Copy-Item (Join-Path $StagingDir 'winpeshl.ini') $System32
+    Dismount-Wim -Commit
+    $Saved = $true
+  }
+  finally {
+    if (-not $Saved) {
+      try { Dismount-Wim } catch { Write-Warning "Add-DiskPicker: discard failed: $_" }
+    }
+  }
 }
 
 function Find-Oscdimg {
@@ -534,13 +961,7 @@ function New-IsoImage([string] $Source, [string] $OutputFile, [string] $Label, [
 function Test-IsoImage([string] $Path, [int] $ExpectedImageCount) {
   $DiskImage = Mount-DiskImage -ImagePath $Path -StorageType ISO -Access ReadOnly -PassThru
   try {
-    $Volume = $null
-    for ($i = 0; $i -lt 30; $i++) {
-      $Volume = $DiskImage | Get-Volume -ErrorAction SilentlyContinue
-      if ($Volume -and $Volume.DriveLetter) { break }
-      Start-Sleep -Seconds 1
-    }
-    if (-not ($Volume -and $Volume.DriveLetter)) { throw "Test-IsoImage: $Path mounted but no drive letter was assigned." }
+    $Volume = Get-IsoVolume $DiskImage $Path
 
     $Root = "$($Volume.DriveLetter):\"
     foreach ($Required in 'sources\boot.wim', 'autounattend.xml', 'bootmgr', 'efi\boot\bootx64.efi') {
@@ -566,6 +987,31 @@ function Test-IsoImage([string] $Path, [int] $ExpectedImageCount) {
   }
 }
 
+# Keep the ISO being replaced as <name>.previous.iso, with $Path's .json/.sha256.txt as
+# <name>.previous.iso.json/.sha256.txt, replacing any older previous copy. $Iso is the old
+# ISO, already renamed out of the way. A client on the share may have the old previous
+# copy open, which blocks deleting it; that only costs keeping this one, so it is a warning.
+function Save-PreviousOutput([string] $Path, [string] $Iso) {
+  $Previous = Join-Path (Split-Path $Path) ([System.IO.Path]::GetFileNameWithoutExtension($Path) + '.previous' + [System.IO.Path]::GetExtension($Path))
+
+  try {
+    if (Test-Path $Previous) { Remove-Item $Previous -Force }
+    Move-Item $Iso $Previous
+  }
+  catch {
+    Add-BuildWarning "could not replace $Previous (open on the share?), so the ISO being replaced was not kept: $_"
+    return
+  }
+  foreach ($Suffix in '.json', '.sha256.txt') {
+    try {
+      if (Test-Path "$Previous$Suffix") { Remove-Item "$Previous$Suffix" -Force }
+      if (Test-Path "$Path$Suffix") { Move-Item "$Path$Suffix" "$Previous$Suffix" }
+    }
+    catch { Add-BuildWarning "could not keep $Path$Suffix as $Previous$($Suffix): $_" }
+  }
+  Write-Host "Save-PreviousOutput: kept the ISO being replaced as $Previous."
+}
+
 #endregion
 
 $ExitCode = 1
@@ -584,6 +1030,19 @@ try {
   $Config = Get-Content -Raw $ConfigFile | ConvertFrom-Json
   if (-not (Test-Path $Autounattend)) { throw "Autounattend file not found: $Autounattend" }
   if ($WinREWimPath -and -not (Test-Path $WinREWimPath)) { throw "WinRE file not found: $WinREWimPath" }
+
+  # driver sets: from -DriverSetsFile (runner-config.json style, or a bare array) and/or -VirtIOIsoPath.
+  # Get-DriverSets fails on a configured set whose path is missing.
+  . (Join-Path $PSScriptRoot 'DriverSets.ps1')
+  $script:DriverSets = @()
+  if ($DriverSetsFile) {
+    $SetsConfig = Get-Content -Raw $DriverSetsFile | ConvertFrom-Json
+    if ($SetsConfig -is [array]) { $SetsConfig = [PSCustomObject]@{ DriverSets = $SetsConfig } }
+    $script:DriverSets += @(Get-DriverSets $SetsConfig)
+  }
+  if ($VirtIOIsoPath) {
+    $script:DriverSets += @(Get-DriverSets ([PSCustomObject]@{ VirtIO = [PSCustomObject]@{ IsoPath = $VirtIOIsoPath; Drivers = @($VirtIODrivers -split ',') } }))
+  }
 
   # DISM logs and scratch space live with the build, not on C:
   New-Item -ItemType Directory -Force -Path $WorkingDir, $MountDir, $DismScratch | Out-Null
@@ -621,18 +1080,43 @@ try {
 
   $ImageCount = @(Get-WindowsImage -ImagePath $InstallWim).Count
 
+  # boot.wim gets the drivers for the OS on this media (from the first image)
+  Open-DriverSets
+  $BootDriverFolder = $null
+  if (Get-TargetDriverSets 'boot') {
+    $First = Get-WindowsImage -ImagePath $InstallWim -Index 1
+    $BootDriverFolder = Get-DriverOsFolder $First.Version $First.InstallationType
+  }
+
+  # iso.DiskPicker: pick the target disk in WinPE instead of wiping disk 0
+  $IsoConfig = Get-ConfigValue $Config 'iso'
+  $DiskPicker = [bool](Get-ConfigValue $IsoConfig 'DiskPicker' $false)
+  $DiskPickerDir = $null
+  if ($DiskPicker) {
+    $DiskPickerDir = Join-Path $WorkingDir 'DiskPicker'
+    if (Test-Path $DiskPickerDir) { Remove-Item $DiskPickerDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $DiskPickerDir | Out-Null
+  }
+
   Write-Host 'Customize-Iso: adding autounattend.xml and post-install stubs.'
-  Set-Unattend -Source $Autounattend -MediaRoot $ScratchPath -ImageCount $ImageCount
+  Set-Unattend -Source $Autounattend -MediaRoot $ScratchPath -ImageCount $ImageCount -DiskPickerDir $DiskPickerDir
   $OemPath = Join-Path $ScratchPath 'sources\$OEM$\$1'
   New-Item -ItemType Directory -Force -Path $OemPath | Out-Null
   Copy-Item (Join-Path $PSScriptRoot 'stub-scripts\*') $OemPath -Recurse -Force
 
+  # Defender update for every image: best effort, so a missing or bad package is a warning
+  if (Get-ConfigValue $Config.install 'DefenderUpdate' $true) { $script:Defender = Initialize-DefenderUpdate $DefenderPackage }
+
   Write-Host 'Customize-Iso: customizing install.wim.'
   # returns the final install image path (install.wim or install.esd)
   $InstallImage = @(Set-InstallImage -InstallWim $InstallWim -Config $Config)[-1]
+  if ($script:Defender) { Remove-Item $script:Defender.Root -Recurse -Force }
 
   Write-Host 'Customize-Iso: customizing boot.wim.'
-  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot')
+  Set-BootImage -BootWim $BootWim -BootConfig (Get-ConfigValue $Config 'boot') -DriverOsFolder $BootDriverFolder
+  if ($DiskPicker) {
+    Add-DiskPicker -BootWim $BootWim -StagingDir $DiskPickerDir -MinSizeGB ([int](Get-ConfigValue $IsoConfig 'DiskPickerMinSizeGB' 50))
+  }
 
   Write-Host 'Customize-Iso: building ISO.'
   New-IsoImage -Source $ScratchPath -OutputFile $StagingIso -Label $VolumeLabel `
@@ -641,18 +1125,34 @@ try {
   Write-Host 'Customize-Iso: verifying ISO.'
   $Images = @(Test-IsoImage -Path $StagingIso -ExpectedImageCount $ImageCount)
 
-  # publish: drop the old manifest first so a manifest only ever describes a complete ISO
+  # publish
   $ManifestPath = "$OutPath.json"
   $ChecksumPath = "$OutPath.sha256.txt"
   New-Item -ItemType Directory -Force -Path (Split-Path $OutPath) | Out-Null
-  foreach ($Path in $ManifestPath, $ChecksumPath) { if (Test-Path $Path) { Remove-Item $Path -Force } }
 
   $Checksum = (Get-FileHash -Algorithm SHA256 $StagingIso).Hash.ToLowerInvariant()
 
-  # move beside the destination, then rename over it, so the published ISO is never half-written
+  # move beside the destination, then rename into place, so the published ISO is never half-written
   $Temporary = "$OutPath.partial"
   Move-Item $StagingIso $Temporary -Force
-  Move-Item $Temporary $OutPath -Force
+
+  # Rename the old ISO out of the way first. A client on the share that has it open
+  # blocks this, and then the build fails with the old ISO and its sidecars untouched.
+  $Replaced = "$OutPath.replaced"
+  if (Test-Path $Replaced) { Remove-Item $Replaced -Force }
+  if (Test-Path $OutPath) {
+    try { Move-Item $OutPath $Replaced }
+    catch {
+      Remove-Item $Temporary -Force -ErrorAction SilentlyContinue
+      throw "could not replace $OutPath (open by a client on the share?): $_"
+    }
+    if ($KeepPrevious) { Save-PreviousOutput -Path $OutPath -Iso $Replaced }
+  }
+
+  # drop the old manifest first so a manifest only ever describes a complete ISO
+  foreach ($Path in $ManifestPath, $ChecksumPath) { if (Test-Path $Path) { Remove-Item $Path -Force } }
+  Move-Item $Temporary $OutPath
+  try { if (Test-Path $Replaced) { Remove-Item $Replaced -Force } } catch { Add-BuildWarning "could not delete $($Replaced): $_" }
 
   Set-Content -Encoding ascii -NoNewline -Path $ChecksumPath -Value $Checksum
   [PSCustomObject]@{
@@ -664,6 +1164,11 @@ try {
     format      = [System.IO.Path]::GetExtension($InstallImage).TrimStart('.')
     images      = @($Images)
     removed     = @($script:Removed)
+    virtio      = @($script:DriverSets | Where-Object Type -eq 'virtio-iso' | ForEach-Object Label) | Select-Object -First 1
+    driverSets  = @($script:DriverSets | ForEach-Object { [PSCustomObject]@{ name = $_.Name; type = $_.Type; path = $_.Path; label = $_.Label; targets = @($_.Targets) } })
+    drivers     = @($script:DriversAdded)
+    diskpicker  = $DiskPicker
+    defender    = $script:DefenderSummary
     warnings    = @($script:Warnings)
     elapsed     = [math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)
   } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $ManifestPath
@@ -694,6 +1199,7 @@ finally {
     }
     catch { Write-Warning "cleanup: $_" }
   }
+  Close-DriverSets
   Stop-Transcript | Out-Null
 }
 

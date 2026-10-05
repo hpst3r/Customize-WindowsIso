@@ -5,5 +5,29 @@
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
   "BuildPostinstallIso": true,
+  "KeepPrevious": true,
+  "BuildIndex": true,
+  "DeleteSourceAfterBuild": false,
+  "DriverSets": [
+    {
+      "Name": "VirtIO",
+      "Type": "virtio-iso",
+      "Path": "Y:\\IsoBuild\\Cache\\virtio-win.iso",
+      "Drivers": ["vioscsi", "viostor", "NetKVM"],
+      "Targets": ["boot", "install", "winre"]
+    },
+    {
+      "Name": "Storage",
+      "Type": "folder",
+      "Path": "Y:\\IsoBuild\\Drivers\\Storage",
+      "Targets": ["boot", "install", "winre"],
+      "Enabled": false
+    }
+  ],
+  "Defender": {
+    "Url": "https://go.microsoft.com/fwlink/?linkid=2144531",
+    "CacheDirectory": "Y:\\IsoBuild\\Cache\\defender",
+    "RebuildOnSignatureUpdate": false
+  },
   "LogRetentionDays": 90
 }
