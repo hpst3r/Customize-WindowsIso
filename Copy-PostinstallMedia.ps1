@@ -6,7 +6,7 @@ Copies the post-install media (.postinstall, office, virtio) to the root of a US
 
 .DESCRIPTION
 The source is the folder New-PostinstallIso.ps1 keeps (runner-config.json's
-PostinstallFolder, e.g. \\server\Customized\postinstall) or postinstall.iso.
+PostinstallFolder, e.g. \\server\Customized\postinstall) or a postinstall-*.iso.
 Each of the three folders is mirrored: only changed files are copied, and files
 no longer in the source are deleted from that folder. Nothing else on the drive
 (Ventoy ISOs, other folders) is touched.
