@@ -13,7 +13,7 @@ first (via `winpeshl.ini` in `boot.wim`), which looks at the disks:
 | several | a **menu** (below) |
 | none | an explanation (usually a missing storage driver) and a way to load one |
 
-It's off by default; the weekly ISOs are built without it until you switch it on.
+It's on in this repository's `config.json` (the code's default is off). An `autounattend.xml` on another drive overrides it (below).
 
 ## The menu
 
@@ -76,15 +76,23 @@ installed from an ISO without the VirtIO driver set. `L` loads the driver from a
 Setup's own page do it (*Load driver*). For good, add the driver to a
 [driver set](configuration.md#driver-sets) so it's in every ISO.
 
-## Turning it on
+## Turning it off and on
 
 ```json
 "iso": { "NoPrompt": true, "DiskPicker": true, "DiskPickerMinSizeGB": 50 }
 ```
 
-in `config.json`; the next run rebuilds every ISO. The ISO's own `autounattend.xml` then has no disk
+in `config.json` (`false` turns it off); the next run rebuilds every ISO. The ISO's own `autounattend.xml` then has no disk
 settings at all, so if Setup ever starts without the picker it asks for the disk instead of wiping
 one.
+
+## An answer file on another drive
+
+An `autounattend.xml` at the root of any other drive (a stick, a second DVD) **overrides the picker**:
+it runs Setup with that file and steps aside, and the file's own disk settings decide (with none,
+Setup asks). Without the picker, Setup would have picked that file up by itself: drives other than
+the install media come first in its search order, and the picker keeps that behaviour. The install
+tests use this to answer the edition question on multi-edition media.
 
 ## Under the hood
 

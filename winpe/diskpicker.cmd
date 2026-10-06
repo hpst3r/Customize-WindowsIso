@@ -5,6 +5,9 @@ rem winpeshl.ini in the Setup image of boot.wim runs this instead of X:\setup.ex
 rem   - exactly one internal disk of at least DP_MIN_GB: wipe it and install, no questions
 rem   - several: numbered menu; the technician picks one (or lets Setup show its own page)
 rem   - none: explain (usually a missing storage driver) and offer a driver load / prompt
+rem   - an autounattend.xml at the root of another drive (not the install media): run Setup
+rem     with that answer file and stay out of the way, as Setup itself would (an answer file
+rem     on removable media wins over the DVD's); its disk settings apply (none: Setup asks)
 rem
 rem Only cmd, diskpart, reg, wpeutil and drvload are used: the Setup image has no findstr,
 rem choice, timeout or wmic, and Server 2022's has no PowerShell.
@@ -52,6 +55,9 @@ rem drivers included) and start networking, as WinPE normally does
 if not defined TEST wpeinit
 call :firmware
 call :log firmware %FIRMWARE%
+call :findMedia
+call :findAnswer
+if defined ANSWERFILE goto :answerFile
 
 set "FORCEMENU="
 
@@ -241,6 +247,20 @@ reg add HKLM\SYSTEM\Setup /v UnattendFile /t REG_SZ /d "%WORK%\unattend.xml" /f 
 start "" /wait "%SETUP%" /unattend:%WORK%\unattend.xml
 goto :setupExited
 
+rem Setup with an answer file found on another drive, which takes over completely
+:answerFile
+echo(
+echo   Found an answer file on another drive: %ANSWERFILE%
+echo   Running Setup with it; the disk is whatever it says.
+call :log answer file %ANSWERFILE% found, running %SETUP% with it
+if defined TEST (
+  echo [test] would run: "%SETUP%" /unattend:%ANSWERFILE%
+  exit /b 0
+)
+reg add HKLM\SYSTEM\Setup /v UnattendFile /t REG_SZ /d "%ANSWERFILE%" /f >nul
+start "" /wait "%SETUP%" /unattend:%ANSWERFILE%
+goto :setupExited
+
 rem Setup with the media's own answer file, which has no disk settings when the
 rem picker is in use, so Setup shows its disk page
 :setupOnly
@@ -299,16 +319,7 @@ set "OTHERS="
 set "NPICK=0"
 set "NAUTO=0"
 
-rem the install media: a volume with \sources\boot.wim (X: is WinPE's RAM disk)
-set "MEDIA="
-if defined TEST (
-  set "MEDIA=%DP_TEST_MEDIA%"
-) else (
-  for %%L in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
-    if exist "%%L:\sources\boot.wim" set "MEDIA=!MEDIA! %%L"
-  )
-)
-call :log media volume(s): %MEDIA%
+call :findMedia
 
 echo   Looking for disks...
 if defined TEST (
@@ -339,6 +350,36 @@ for %%n in (%DISKS%) do (
   call :classify %%n
 )
 call :log disks:%DISKS%; pickable:%PICKABLE%; automatic:%AUTO%; other:%OTHERS%
+goto :eof
+
+rem MEDIA = the letters of the install media: volumes with \sources\boot.wim (X: is WinPE's RAM disk)
+:findMedia
+set "MEDIA="
+if defined TEST (
+  set "MEDIA=%DP_TEST_MEDIA%"
+) else (
+  for %%L in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+    if exist "%%L:\sources\boot.wim" set "MEDIA=!MEDIA! %%L"
+  )
+)
+call :log media volume(s): %MEDIA%
+goto :eof
+
+rem ANSWERFILE = the first <letter>:\autounattend.xml on a drive that isn't the install media
+:findAnswer
+set "ANSWERFILE="
+if defined TEST (
+  if defined DP_TEST_ANSWER set "ANSWERFILE=%DP_TEST_ANSWER%"
+  goto :eof
+)
+for %%L in (C D E F G H I J K L M N O P Q R S T U V W Y Z) do (
+  if not defined ANSWERFILE if exist "%%L:\autounattend.xml" (
+    set "_media="
+    for %%m in (%MEDIA%) do if /i "%%m"=="%%L" set "_media=1"
+    if not defined _media set "ANSWERFILE=%%L:\autounattend.xml"
+  )
+)
+if defined ANSWERFILE call :log answer file on another drive: %ANSWERFILE%
 goto :eof
 
 rem :addDisk <n> <rest of the list disk line>: size is the first "<number> <unit>"

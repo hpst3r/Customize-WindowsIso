@@ -73,7 +73,7 @@ install. With a single edition, Setup installs it without asking.
 - `install.DefenderUpdate`: apply Microsoft's Defender update to every image (default `true`; see below)
 - `boot.LabConfig`: Windows 11 Setup hardware-check bypasses to enable
 - `iso.NoPrompt`: use `efisys_noprompt.bin` so UEFI boot doesn't wait for a key press
-- `iso.DiskPicker` (default `false`): choose the install disk in WinPE instead of wiping disk 0 (below)
+- `iso.DiskPicker` (default `false`, `true` in this config): choose the install disk in WinPE instead of wiping disk 0 (below)
 - `iso.DiskPickerMinSizeGB` (default `50`): smallest disk the picker installs to without asking
 
 ## Profiles
@@ -126,7 +126,7 @@ The manifest records the profile each image got. Configs from before profiles (w
 
 ## Choosing the install disk (`iso.DiskPicker`)
 
-> Not yet tested on real hardware or VMs. Off by default; with it off, the ISO is built exactly as before.
+> On in this config, and tested on Proxmox VMs (one disk, two disks) and with recorded diskpart output; not yet on physical machines. Off by default in the code; with it off, the ISO is built exactly as before.
 
 With `iso.DiskPicker` on, the ISO no longer wipes disk 0 blindly. A script in the Setup image of
 `boot.wim` (`winpe\diskpicker.cmd`, started by `winpeshl.ini` instead of Setup) looks at the disks first:
@@ -149,6 +149,9 @@ starts Setup with `/unattend:` pointing at a copy of the media's answer file wit
 that disk. The media's own `autounattend.xml` has no disk settings, so if Setup ever starts without
 the picker (`S`, or a future boot.wim that ignores `winpeshl.ini`), Setup asks for the disk rather
 than wiping one.
+
+An `autounattend.xml` at the root of another drive overrides the picker: it runs Setup with that file
+instead (as Setup itself would have, since other drives come first in its search order).
 
 The picker uses only cmd and diskpart: the Setup image has no `findstr`, `choice` or `wmic`, and
 Server 2022's has no PowerShell, so it's a typed menu rather than an arrow-key one.

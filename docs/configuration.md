@@ -16,7 +16,7 @@ Plus `autounattend.xml` (the answer file on every ISO) and `.postinstall\office\
 ```json
 {
   "boot":    { "LabConfig": { "BypassTPMCheck": true, "BypassSecureBootCheck": true, "BypassRAMCheck": true, ... } },
-  "iso":     { "NoPrompt": true, "DiskPicker": false, "DiskPickerMinSizeGB": 50 },
+  "iso":     { "NoPrompt": true, "DiskPicker": true, "DiskPickerMinSizeGB": 50 },
   "install": { "Format": "esd", "ExportWim": true, "DefenderUpdate": true, "UpdateWinGet": true,
                "ProfileRules": [ ... ], "Profiles": { ... } }
 }
@@ -26,7 +26,7 @@ Plus `autounattend.xml` (the answer file on every ISO) and `.postinstall\office\
 |---|---|---|
 | `boot.LabConfig.*` | TPM, Secure Boot, RAM on | Windows 11 Setup's hardware-check bypasses, written into the Setup image (`boot.wim`). CPU and storage checks are off. |
 | `iso.NoPrompt` | `true` | UEFI boot doesn't wait for "press any key to boot from CD". **The ISO then reinstalls on any machine it's left attached to**: remove it after Setup. |
-| `iso.DiskPicker` | `false` | Choose the install disk in WinPE instead of wiping disk 0 ([disk picker](disk-picker.md)). |
+| `iso.DiskPicker` | `false` (on in this config) | Choose the install disk in WinPE instead of wiping disk 0 ([disk picker](disk-picker.md)). |
 | `iso.DiskPickerMinSizeGB` | `50` | Smallest disk the picker uses without asking. |
 | `install.Format` | `esd` | `esd`: `install.esd` with LZMS compression, ~20 % smaller, 2.5x slower to build. `wim`: `install.wim`. |
 | `install.ExportWim` | `true` | With `wim`, re-export after servicing (smaller). |

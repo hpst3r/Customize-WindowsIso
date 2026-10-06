@@ -191,6 +191,21 @@ try {
     $Value = $Answer.CreateElement('Value', $U); $Value.InnerText = "$($Image.Index)"; $MetaData.AppendChild($Value) | Out-Null
     $InstallFrom.AppendChild($MetaData) | Out-Null
     $OsImage.PrependChild($InstallFrom) | Out-Null
+    # media built with the disk picker have no disk settings (the picker adds them); with an
+    # answer file on another drive the picker steps aside, so take them from the template
+    if (-not $OsImage.SelectSingleNode('u:InstallTo', $Ns)) {
+      [xml] $Template = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot) 'autounattend.xml')
+      $TNs = New-Object System.Xml.XmlNamespaceManager $Template.NameTable
+      $TNs.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
+      $SetupPath = "//u:settings[@pass='windowsPE']/u:component[@name='Microsoft-Windows-Setup']"
+      $DiskConfiguration = $Template.SelectSingleNode("$SetupPath/u:DiskConfiguration", $TNs)
+      $InstallTo = $Template.SelectSingleNode("$SetupPath/u:ImageInstall/u:OSImage/u:InstallTo", $TNs)
+      if (-not $DiskConfiguration -or -not $InstallTo) { throw 'autounattend.xml (the template) has no DiskConfiguration/InstallTo to add' }
+      $SetupComponent = $Answer.SelectSingleNode($SetupPath, $Ns)
+      $SetupComponent.PrependChild($Answer.ImportNode($DiskConfiguration, $true)) | Out-Null
+      $OsImage.AppendChild($Answer.ImportNode($InstallTo, $true)) | Out-Null
+      Write-Step 'disk picker media: the answer file gets the template''s disk settings (disk 0).'
+    }
     # saved to a file and sent as is: XmlDocument.Save to a StringWriter declares
     # encoding="utf-16" over what goes out as UTF-8, and Server 2022's Setup then ignores
     # the answer file (newer Setup tolerates it)

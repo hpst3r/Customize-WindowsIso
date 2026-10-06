@@ -10,7 +10,7 @@
   },
   "iso": {
     "NoPrompt": true,
-    "DiskPicker": false,
+    "DiskPicker": true,
     "DiskPickerMinSizeGB": 50
   },
   "install": {

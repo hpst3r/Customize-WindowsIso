@@ -38,8 +38,8 @@ The repository's [README](../README.md) is the reference for every script and se
 1. Copy the ISO from `\\<build box>\Customized` and the post-install files
    (`Copy-PostinstallMedia.ps1 -Source \\<build box>\Customized\postinstall -Destination E:\`)
    to a Ventoy stick ([media](media.md)).
-2. Boot it, pick the ISO. **It doesn't ask "press any key", and without the disk picker it wipes
-   disk 0.**
+2. Boot it, pick the ISO. **It doesn't ask "press any key".** With one disk it installs there without asking; with several the
+   [disk picker](disk-picker.md) asks which.
 3. Wait. At the first logon, pick the client (and site) in the menu; the scripts run; press Enter.
 
 **Install a VM (Proxmox)**: attach the ISO and `postinstall-client.iso` (or `-server`) as two

@@ -69,7 +69,7 @@ function New-DetailDisk($D) {
 function Invoke-Scenario {
   param ([string] $Name, [object[]] $Disks, [string] $SampleDir, [string[]] $Answers = @(), [string] $Media = '',
     [string] $Firmware = 'UEFI', [int] $MinGB = 50, [string[]] $Expect = @(), [string[]] $Reject = @(),
-    $InstallDisk = $null, [int] $Partition = 3)
+    $InstallDisk = $null, [int] $Partition = 3, [string] $AnswerOverride = '')
 
   $Dir = Join-Path $OutDir $Name
   if (Test-Path $Dir) { Remove-Item $Dir -Recurse -Force }
@@ -90,8 +90,9 @@ function Invoke-Scenario {
 
   # set /p only reads answers line by line from a file, not from a pipe
   $env:DP_TEST_DIR = $Dir; $env:DP_TEST_MEDIA = $Media; $env:DP_TEST_FIRMWARE = $Firmware; $env:DP_MIN_GB = "$MinGB"
+  $env:DP_TEST_ANSWER = $AnswerOverride
   try { $Output = @(cmd.exe /d /c "`"$Script`" < `"$AnswerFile`" 2>&1") -join "`n" }
-  finally { Remove-Item Env:DP_TEST_DIR, Env:DP_TEST_MEDIA, Env:DP_TEST_FIRMWARE, Env:DP_MIN_GB -ErrorAction SilentlyContinue }
+  finally { Remove-Item Env:DP_TEST_DIR, Env:DP_TEST_MEDIA, Env:DP_TEST_FIRMWARE, Env:DP_MIN_GB, Env:DP_TEST_ANSWER -ErrorAction SilentlyContinue }
   Set-Content -Path (Join-Path $Dir 'output.txt') -Value $Output
 
   $Problems = @()
@@ -180,6 +181,11 @@ Invoke-Scenario 'big-and-odd' -Disks @(
   @{ N = 10; Status = 'Online'; Size = '7452 GB'; Model = 'ST8000NM000A-2KE101'; Type = 'SATA' },
   @{ N = 11; Status = 'Offline'; Size = '14 TB'; Model = 'WDC WUH721414ALE6L4'; Type = 'SAS'; RO = 'Yes' }
 ) -Answers @('11', 'YES') -Expect @('7452 GB', '14 TB', 'no media', 'Offline', 'read-only', 'Installing Windows on disk 11', 'select disk 11') -InstallDisk 11
+
+# an answer file on another drive (e.g. a stick, or the install tests' DVD): Setup runs with
+# it, no menu, nothing partitioned by the picker
+Invoke-Scenario 'answer-file-on-another-drive' -SampleDir $Samples -AnswerOverride 'E:\autounattend.xml' `
+  -Expect @('Found an answer file on another drive: E:\autounattend.xml', '/unattend:E:\autounattend.xml') -Reject @('Choice:', 'Erasing and partitioning')
 
 if ($Failures.Count) { Write-Host "$($Failures.Count) scenario(s) failed. Output is in $OutDir."; exit 1 }
 Write-Host "All scenarios passed. Output is in $OutDir."

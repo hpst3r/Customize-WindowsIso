@@ -25,7 +25,7 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 - **Guest tools:** both post-install ISOs carry the VirtIO guest tools and install them silently on VirtIO machines.
 - **Microsoft 365 Apps:** client images install Current Channel Office at first logon from the post-install media (`postinstall-client.iso`, or the folder copied to an SSD), with the CDN as fallback.
 - **Defender:** Microsoft's offline update is applied to every image; a new platform or engine (about monthly) rebuilds.
-- **WinPE disk picker:** built, **off by default** (`iso.DiskPicker`).
+- **WinPE disk picker:** **on** (`iso.DiskPicker`; off by default in the code). Tested on Proxmox VMs with one and two disks. An `autounattend.xml` on another drive overrides it (the install tests rely on this for multi-edition media).
 - **Ops:** notifications (ntfy and SMTP relay), keeping the previous ISO, the share index, optional deletion of source ISOs with stale detection, and `Test-CustomizedIso.ps1`.
 - **ESD output:** optional (`install.Format`).
 - **Install tests:** `ci\Invoke-ImageTests.ps1` installs every image on the Proxmox test node and checks the running machine (see item 2 below). All seven images pass as of 2026-10-06.
@@ -38,14 +38,13 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 
 - [ ] **Notifications:** create `notify.json` from `notify.example.json` (ntfy server/topic and/or SMTP relay on 587 with STARTTLS). Store secrets with `Set-NotificationSecret.ps1`; the task already has the notification step.
 - [ ] **`DeleteSourceAfterBuild`** (currently `false`): saves about 60 GB, but any change to the customization makes every image need a re-download (about 7–8 h for all). Turn it on once changes settle.
-- [ ] **`iso.DiskPicker`:** turn it on after the VM tests below pass.
+- [x] **`iso.DiskPicker`:** on (2026-10-06).
 
 ## Next
 
 ### 1. Test node (Proxmox, separate from prod)
 The dedicated node is `llm-pve` (see item 2). Manual cases still to run there:
-- **Disk picker, single virtio-scsi disk:** fully unattended install. Check that `C:\Windows\Panther\unattend.xml` targets disk 0.
-- **Disk picker, two disks:** the menu appears; pick disk 1; disk 0 is untouched; the `S` key opens Setup's own disk page.
+- **Disk picker, two disks:** done for disk 0 (the docs walkthrough). Still to do: pick disk 1 and check disk 0 is untouched; the `S` key opens Setup's own disk page. (One disk is covered by the weekly install tests.)
 - **Disk picker, USB disk attached:** the USB disk is never offered.
 - **Disk picker, SeaBIOS/MBR:** the BIOS install path works.
 - **Disk picker, Server 2022:** old Setup works with the picker.

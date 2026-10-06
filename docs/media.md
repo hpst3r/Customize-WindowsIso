@@ -46,8 +46,8 @@ would add a second answer file. Then copy the post-install files onto the same s
 Notes:
 
 - The ISO boots **without "press any key"**: remove it after Setup, or the next reboot reinstalls.
-- Without the disk picker, **disk 0 is wiped without asking**. With several disks, turn on the
-  picker or check which disk is 0.
+- With one disk, it's **wiped without asking**; with several, the [disk picker](disk-picker.md) asks.
+  If you turn the picker off, disk 0 is wiped without asking, whatever it is.
 - `install.esd`/`install.wim` can be over 4 GB; FAT32-only tools may refuse it. Ventoy and Rufus
   handle it.
 
