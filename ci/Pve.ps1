@@ -50,7 +50,7 @@ function Invoke-Pve([string] $Command, [string] $InputText, [int] $TimeoutSecond
   $Result = Invoke-Exe 'ssh.exe' (@(Get-SshOptions) + @("$($Ci.SshUser)@$($Ci.Host)", $Command)) -InputText $InputText -TimeoutSeconds $TimeoutSeconds
   if ($Result.ExitCode -ne 0 -and -not $AllowFailure) {
     $Shown = if ($Command.Length -gt 120) { $Command.Substring(0, 117) + '...' } else { $Command }
-    throw "on $($Ci.Host): '$Shown' exited with $($Result.ExitCode): $(($Result.Error.Trim() -split "`n" | Select-Object -Last 3) -join ' | ')"
+    throw "on $($Ci.Host): '$Shown' exited with $($Result.ExitCode): $(($Result.Error.Trim() -split '\r?\n' | Select-Object -Last 3) -join ' | ')"
   }
   if ($Raw) { $Result } else { $Result.Output }
 }

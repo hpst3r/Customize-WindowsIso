@@ -10,7 +10,7 @@ Installs one customized ISO (one edition) in a throwaway Proxmox VM and checks t
 2. Creates a VM like the hardware the images are made for: q35, OVMF with Secure Boot keys,
    TPM 2.0, virtio-scsi disk, virtio-net. The ISO's own autounattend.xml drives Setup; for
    multi-edition media (which ask for the edition) a copy of it with /IMAGE/INDEX set is
-   attached on a virtual USB stick, which Setup reads before the DVD's.
+   attached as a small DVD in the first IDE slot, which Setup reads before the ISO's.
 3. Waits for Setup, specialize and the first-logon scripts (the CI media replaces the
    "Press Enter" pauses with completion markers), taking console screenshots as it goes.
 4. Runs ci\Test-InstalledWindows.ps1 in the guest against what the ISO's manifest and
@@ -67,12 +67,19 @@ $Result = [ordered]@{
   phases = [ordered]@{}; summary = $null; checks = @(); facts = $null; vmKept = $false; directory = $OutDir
 }
 $Phase = 'prepare'
-$UsbImage = $null
+$AnswerIso = $null
 
 function Write-Step([string] $Text) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $($Short): $Text" }
+# a console screenshot; tracks when the screen last showed something new (identical frames
+# give identical PNGs, and a spinner only cycles through a few frames)
+$script:SeenFrames = New-Object 'System.Collections.Generic.HashSet[string]'
+$script:ScreenChanged = Get-Date
 function Save-Shot([string] $Label) {
   $Path = Join-Path $OutDir ("{0:000}m-{1}.png" -f [int]((Get-Date) - $Started).TotalMinutes, $Label)
-  $null = Save-VmScreenshot $VmId $Path
+  if (-not (Save-VmScreenshot $VmId $Path)) { return }
+  if ($script:SeenFrames.Add((Get-FileHash -Algorithm SHA256 $Path).Hash)) { $script:ScreenChanged = Get-Date }
+  # a frame seen before needs no second picture
+  else { Remove-Item -LiteralPath $Path -Force }
 }
 
 # the ISO on the node under a stable name, re-uploaded only when its SHA-256 changed
@@ -140,8 +147,11 @@ try {
   if (-not $CiMediaSha) { $CiMediaSha = (Get-FileHash -Algorithm SHA256 $CiMediaPath).Hash.ToLowerInvariant() }
   Publish-Iso $CiMediaPath 'ci-postinstall.iso' $CiMediaSha
 
-  # multi-edition media: the ISO's answer file plus the edition, on a USB stick
-  $UsbArgs = ''
+  # multi-edition media: the ISO's answer file plus the edition, on a small DVD in front of it.
+  # Setup reads the first autounattend.xml in drive-letter order, and the first IDE slot gets
+  # the first letter. (Not a USB stick: with a USB disk attached, OVMF reads the DVD so slowly
+  # that Setup takes forever to boot.)
+  $AnswerIso = $null
   if ($Images.Count -gt 1) {
     $Disk = Mount-DiskImage -ImagePath $Iso.FullName -StorageType ISO -Access ReadOnly -PassThru
     try {
@@ -168,12 +178,12 @@ try {
     $Answer.Save($Writer)
     $Answer.Save((Join-Path $OutDir 'autounattend-ci.xml'))
 
-    $UsbImage = "$($Ci.WorkDirectoryOnNode)/unattend-$VmId.img"
-    $Mount = "$($Ci.WorkDirectoryOnNode)/mnt-$VmId"
-    Invoke-Pve ("set -e; mkdir -p $($Ci.WorkDirectoryOnNode) $Mount; rm -f $UsbImage; truncate -s 16M $UsbImage; mkfs.vfat -n CIANSWER $UsbImage >/dev/null; " +
-      "mount -o loop $UsbImage $Mount; $StripBom > $Mount/autounattend.xml; umount $Mount") -InputText $Writer.ToString() | Out-Null
-    $UsbArgs = "-device qemu-xhci,id=ciusb -drive file=$UsbImage,if=none,id=cianswer,format=raw -device usb-storage,bus=ciusb.0,drive=cianswer,removable=on"
-    Write-Step "answer file for edition $($Image.Index) ($($Image.Name)) on a virtual USB stick."
+    $AnswerIso = "ci-answer-$VmId.iso"
+    $Folder = "$($Ci.WorkDirectoryOnNode)/answer-$VmId"
+    # -J: Joliet, for the long lowercase name
+    Invoke-Pve ("set -e; rm -rf $Folder; mkdir -p $Folder; $StripBom > $Folder/autounattend.xml; " +
+      "genisoimage -quiet -J -l -V CIANSWER -o $($Ci.IsoDirectory)/$AnswerIso $Folder; rm -rf $Folder") -InputText $Writer.ToString() | Out-Null
+    Write-Step "answer file for edition $($Image.Index) ($($Image.Name)) on $AnswerIso."
   }
   #endregion
 
@@ -187,13 +197,14 @@ try {
     "--efidisk0 $($Ci.DiskStorage):1,efitype=4m,pre-enrolled-keys=1 --tpmstate0 $($Ci.DiskStorage):1,version=v2.0",
     "--scsihw virtio-scsi-single --scsi0 $($Ci.DiskStorage):$($Ci.DiskGB),iothread=1,discard=on,ssd=1",
     "--net0 virtio,bridge=$($Ci.Bridge)",
-    "--ide2 $($Ci.IsoStorage):iso/$RemoteIso,media=cdrom --ide0 $($Ci.IsoStorage):iso/ci-postinstall.iso,media=cdrom",
+    "--ide2 $($Ci.IsoStorage):iso/$RemoteIso,media=cdrom --ide1 $($Ci.IsoStorage):iso/ci-postinstall.iso,media=cdrom",
     "--boot 'order=scsi0;ide2' --agent enabled=1 --vga std --tags ci --description 'Customize-WindowsIso install test: $($Iso.Name) $($Image.Name)'"
   ) -join ' '
-  if ($UsbArgs) { $Create += " --args '$UsbArgs'" }
+  if ($AnswerIso) { $Create += " --ide0 $($Ci.IsoStorage):iso/$AnswerIso,media=cdrom" }
   Invoke-Pve $Create -TimeoutSeconds 300 | Out-Null
   Invoke-Pve "qm start $VmId" -TimeoutSeconds 120 | Out-Null
   $Booted = Get-Date
+  $script:ScreenChanged = $Booted
   Write-Step "VM $VmId started: $($Image.Name) from $RemoteIso."
   #endregion
 
@@ -205,6 +216,12 @@ try {
     if ((Get-VmStatus $VmId) -ne 'running') { throw "the VM stopped during Setup" }
     if ((Get-Date) -gt $Deadline) { Save-Shot 'setup-timeout'; throw "the guest agent didn't answer within $($Ci.SetupTimeoutMinutes) minutes (Setup stuck, or the guest tools didn't install)" }
     if ((Get-Date) -ge $NextShot) { Save-Shot 'setup'; $NextShot = (Get-Date).AddMinutes($Ci.ScreenshotMinutes) }
+    # Setup keeps showing new things (progress, phases); a screen with nothing new is stuck
+    $Still = ((Get-Date) - $script:ScreenChanged).TotalMinutes
+    if ($Still -ge (Get-CiValue $Ci 'StallMinutes' 20)) {
+      Save-Shot 'stalled'
+      throw "Setup has shown nothing new for $([int]$Still) minutes: stuck at a prompt, an error or a boot hang (see the last screenshot)"
+    }
     Start-Sleep -Seconds 20
   }
   $Result.phases.setupMinutes = [math]::Round(((Get-Date) - $Booted).TotalMinutes, 1)
@@ -261,7 +278,7 @@ finally {
     $Result.vmKept = $true
     Write-Step "kept VM $VmId (stopped) for troubleshooting; the next test replaces it."
   }
-  if ($UsbImage -and -not $Result.vmKept) { Invoke-Pve "rm -f $UsbImage" -AllowFailure | Out-Null }
+  if ($AnswerIso -and -not $Result.vmKept) { Invoke-Pve "rm -f $($Ci.IsoDirectory)/$AnswerIso" -AllowFailure | Out-Null }
 
   [PSCustomObject] $Result | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
   Write-Step "$($Result.result): $($Result.summary)$(if ($Result.error) { " - $($Result.error)" }) ($($Result.phases.totalMinutes) min)."

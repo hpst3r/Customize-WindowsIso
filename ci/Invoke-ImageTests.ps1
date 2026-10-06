@@ -123,7 +123,7 @@ try {
       Where-Object { $R = Get-Content -Raw $_ | ConvertFrom-Json; $R.iso -eq $Test.Iso.Name -and $R.edition -eq $Test.Edition -and [datetime]$R.started -ge $Started } | Select-Object -First 1
     $Result = if ($ResultFile) { Get-Content -Raw $ResultFile | ConvertFrom-Json }
     $Passed = $Process.ExitCode -eq 0 -and $Result -and $Result.result -eq 'Pass'
-    $Status = if ($Passed) { "passed: $($Result.summary)" } elseif ($Result) { "$($Result.error) ($($Result.summary))" } else { "Test-IsoOnPve.ps1 exited with $($Process.ExitCode) and wrote no result" }
+    $Status = if ($Passed) { "passed: $($Result.summary)" } elseif ($Result) { "$($Result.error)$(if (@($Result.checks).Count) { " ($($Result.summary))" })" } else { "Test-IsoOnPve.ps1 exited with $($Process.ExitCode) and wrote no result" }
     $Items.Add([PSCustomObject]@{
         name      = $Label
         result    = $(if ($Passed) { 'Passed' } else { 'Failed' })

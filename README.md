@@ -443,11 +443,16 @@ in a throwaway VM on a dedicated Proxmox VE node, one at a time, and checks the 
 2. **VM** (`ci\Test-IsoOnPve.ps1`): q35, OVMF with Secure Boot keys, TPM 2.0, virtio-scsi
    disk, virtio-net, both ISOs attached. The ISO's own `autounattend.xml` drives Setup.
    Multi-edition media would stop at the edition page, so for those a copy of the ISO's answer
-   file with `/IMAGE/INDEX` added goes on a virtual USB stick, which Setup reads before the DVD.
+   file with `/IMAGE/INDEX` added goes on a small DVD in the first IDE slot: Setup reads the
+   first `autounattend.xml` in drive-letter order. (A virtual USB stick would also work, but
+   with a USB disk attached OVMF reads the DVD so slowly that Setup takes ages to boot.)
    Which editions of multi-edition ISOs are tested: `MultiEditionTest` (default: Datacenter
    with Desktop Experience).
 3. **Waits** for Setup (until the QEMU guest agent, installed by the first-logon scripts,
    answers) and then for the first-logon scripts, taking a console screenshot every few minutes.
+   Setup's screens always move (progress, spinners), so a screen that hasn't changed for
+   `StallMinutes` (20) fails the test right away: Setup is waiting at a prompt or an error,
+   e.g. the empty disk list of an ISO without the storage driver.
 4. **Checks** in the guest (`ci\Test-InstalledWindows.ps1`, run as SYSTEM through the agent)
    against the ISO's manifest and its profile in `config.json`: specialize and first-logon
    scripts finished without errors; edition, installation type and build; the local admin;

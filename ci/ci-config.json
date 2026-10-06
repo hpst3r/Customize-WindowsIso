@@ -20,6 +20,7 @@
   "SetupTimeoutMinutes": 90,
   "PostinstallTimeoutMinutes": 60,
   "ScreenshotMinutes": 5,
+  "StallMinutes": 20,
 
   "ImageDirectory": "Y:\\Images\\Customized",
   "RunnerConfigFile": "Y:\\src\\Customize-WindowsIso\\runner-config.json",
