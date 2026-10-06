@@ -242,6 +242,28 @@ from the CDN. Changing the product ID needs no new download; changing the channe
 languages makes the next run download again. Turn the download off with `Office.Enabled =
 false` in `runner-config.json`.
 
+## Secure Boot back on (Dell)
+
+PCs installed from Ventoy usually have Secure Boot turned off. On Dell PCs,
+`.postinstall\oobe\x-enable-secure-boot.ps1` turns it back on at the end of first logon (it takes
+effect at the next restart), using Dell Command | Configure's `cctk.exe` without installing it:
+
+```powershell
+# once per drive: copy cctk (Command | Configure's X86_64 folder) to dell\X86_64 on the drive
+.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\ -DellCctk 'C:\Program Files (x86)\Dell\Command Configure\X86_64'
+```
+
+- It only acts on Dells that booted Windows in UEFI mode with Secure Boot off. On anything else,
+  or in legacy BIOS mode (where Secure Boot would leave the disk unbootable), it does nothing.
+- `cctk.exe` must be signed by Dell. It's found in `dell\X86_64` on any drive, or in an installed
+  Command | Configure. Dell's files stay off the repo, the share and the built media.
+- If Legacy Option ROMs block Secure Boot (cctk error 120), it turns them off first.
+- If a BIOS setup (admin) password is set, it asks for it at the console. The password is never
+  stored or logged. Without a console, the script skips.
+- If BitLocker is already protecting the system drive, it's suspended for one restart, so the
+  change doesn't ask for the recovery key.
+- After this, the Ventoy drive only boots on that PC if Ventoy's key is enrolled.
+
 ## Driver sets (boot-critical storage and network drivers)
 
 To install onto a disk Windows has no inbox driver for (virtio-scsi, many RAID/NVMe
