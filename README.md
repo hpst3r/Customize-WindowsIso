@@ -411,10 +411,11 @@ image, delete its `.iso.json` and `.iso.sha256.txt` from `InputDirectory` too; o
 it is reported as stale.
 
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
-`stub.ps1`, then `runner.ps1`, then `Send-BuildNotification.ps1` (see Notifications):
+`stub.ps1`, then `runner.ps1`, then (with `-InstallTests`) the install tests on the Proxmox test
+node, then `Send-BuildNotification.ps1` (see Notifications):
 
 ```PowerShell
-.\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso
+.\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso -InstallTests
 ```
 
 Logs are in `LogDirectory` (default `Y:\IsoBuild\Logs`). Each ISO has its own
@@ -427,6 +428,57 @@ Each run also writes a machine-readable summary to `LogDirectory\last-run-runner
 per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`), minutes,
 warnings, and the source build, image versions and editions from the manifests.
 Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
+
+## Install tests on Proxmox (`ci\`)
+
+`Test-CustomizedIso.ps1` (below) checks what is in an ISO; the install tests check that it
+actually installs and comes up right. `ci\Invoke-ImageTests.ps1` installs each customized ISO
+in a throwaway VM on a dedicated Proxmox VE node, one at a time, and checks the running machine:
+
+1. **Media**: the ISO and the CI post-install media (`ci\New-CiMedia.ps1`: the repo's
+   `.postinstall` with `ci\postinstall` laid over it, plus the VirtIO guest tools and Office)
+   are copied to the node's ISO storage, skipped when the copy there has the same SHA-256.
+   The CI overlay only replaces the two "Press Enter" pauses with completion markers and keeps
+   a transcript of the first-logon scripts; everything else is the real post-install media.
+2. **VM** (`ci\Test-IsoOnPve.ps1`): q35, OVMF with Secure Boot keys, TPM 2.0, virtio-scsi
+   disk, virtio-net, both ISOs attached. The ISO's own `autounattend.xml` drives Setup.
+   Multi-edition media would stop at the edition page, so for those a copy of the ISO's answer
+   file with `/IMAGE/INDEX` added goes on a virtual USB stick, which Setup reads before the DVD.
+   Which editions of multi-edition ISOs are tested: `MultiEditionTest` (default: Datacenter
+   with Desktop Experience).
+3. **Waits** for Setup (until the QEMU guest agent, installed by the first-logon scripts,
+   answers) and then for the first-logon scripts, taking a console screenshot every few minutes.
+4. **Checks** in the guest (`ci\Test-InstalledWindows.ps1`, run as SYSTEM through the agent)
+   against the ISO's manifest and its profile in `config.json`: specialize and first-logon
+   scripts finished without errors; edition, installation type and build; the local admin;
+   WinRE; boot disk on vioscsi and the image's drivers; network and internet; VirtIO guest
+   tools; AppX packages and capabilities removed; every registry group in HKLM and the Default
+   profile (the logged-on user's copy is a warning only, as Windows rewrites some of it);
+   App Installer at least the version the build provisioned; the software the first-logon
+   scripts install with WinGet (`ExpectSoftware`); Microsoft 365 Apps (version, product,
+   channel) on images that should have it and not on the others; Defender platform and engine;
+   critical events since install.
+5. **Reports**: `ResultsDirectory\<iso>-<timestamp>\` gets `result.json`, the expected values,
+   screenshots, the first-logon transcript and, on failure, Setup's logs. The VM is destroyed,
+   or on failure kept (stopped) for troubleshooting until the next test (`KeepFailedVm`).
+
+An ISO that passed is not tested again until it changes (by SHA-256); failed ones are retried
+every run. The run writes `LogDirectory\last-run-ci.json` for the notification (stage
+"Install tests") and refreshes the index page, which shows each image's last install test.
+
+```PowerShell
+.\ci\Invoke-ImageTests.ps1                    # whatever changed
+.\ci\Invoke-ImageTests.ps1 -Name '*26H2*'      # some ISOs
+.\ci\Invoke-ImageTests.ps1 -Force             # everything
+.\ci\Test-IsoOnPve.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -Edition 'Windows Server 2025 Standard' -CiMediaPath Y:\IsoBuild\ci\ci-postinstall.iso
+```
+
+`ci\ci-config.json` says where and how: the node (`Host`, `Node`), SSH as root with a
+dedicated key (`SshKey`) and a pinned host key (`KnownHostsFile`), the storages and bridge, the
+VM ID and size, timeouts, and the expectations above. Everything goes through `ssh`/`scp` and
+`qm`/`pvesh` on the node. The key and known_hosts live in `Y:\IsoBuild\Secrets`, readable only
+by SYSTEM and Administrators. One test takes about 30-60 minutes; the node needs room for one
+VM (10 GB RAM, a 64 GB thin disk) and three ISOs.
 
 ## Checking a customized ISO (`Test-CustomizedIso.ps1`)
 

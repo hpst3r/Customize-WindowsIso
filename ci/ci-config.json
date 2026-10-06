@@ -1,0 +1,37 @@
+{
+  "Host": "llm-pve.ad.wporter.org",
+  "Node": "800g4m",
+  "SshUser": "root",
+  "SshKey": "Y:\\IsoBuild\\Secrets\\pve_ed25519",
+  "KnownHostsFile": "Y:\\IsoBuild\\Secrets\\known_hosts",
+
+  "IsoStorage": "local",
+  "IsoDirectory": "/var/lib/vz/template/iso",
+  "DiskStorage": "local-lvm",
+  "Bridge": "vmbr0",
+  "WorkDirectoryOnNode": "/var/lib/vz/ci",
+
+  "VmId": 9100,
+  "Cores": 6,
+  "MemoryMB": 10240,
+  "DiskGB": 64,
+  "KeepFailedVm": true,
+
+  "SetupTimeoutMinutes": 90,
+  "PostinstallTimeoutMinutes": 60,
+  "ScreenshotMinutes": 5,
+
+  "ImageDirectory": "Y:\\Images\\Customized",
+  "RunnerConfigFile": "Y:\\src\\Customize-WindowsIso\\runner-config.json",
+  "WorkDirectory": "Y:\\IsoBuild\\ci",
+  "ResultsDirectory": "Y:\\IsoBuild\\Logs\\ci",
+
+  "Exclude": ["*.previous.iso", "postinstall*.iso", "*-virtio-test.iso"],
+  "MultiEditionTest": ["*Datacenter (Desktop Experience)"],
+  "AdminUser": "admin",
+  "ExpectSoftware": {
+    "Client": ["Google Chrome", "Microsoft Visual Studio Code"],
+    "Server": ["Google Chrome", "Microsoft Visual Studio Code"],
+    "Server Core": []
+  }
+}
