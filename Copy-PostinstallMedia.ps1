@@ -14,15 +14,25 @@ no longer in the source are deleted from that folder. Nothing else on the drive
 Installing Microsoft 365 Apps at first logon is fastest from an SSD; on a slow
 USB stick, -SkipOffice leaves office\ off and machines download Office instead.
 
+-DellCctk adds Dell Command | Configure's cctk (a copy of its X86_64 folder) as
+dell\X86_64, for .postinstall\oobe\x-enable-secure-boot.ps1. It isn't part of the
+built media (Dell's files stay out of the repo and the share); without -DellCctk an
+existing dell\ folder on the drive is left as it is.
+
 .EXAMPLE
 .\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\
+
+.EXAMPLE
+.\Copy-PostinstallMedia.ps1 -Source \\server\Customized\postinstall -Destination E:\ -DellCctk 'C:\Program Files (x86)\Dell\Command Configure\X86_64'
 #>
 param (
   [Parameter(Mandatory)] [string] $Source,
   # the drive root (or a folder standing in for one)
   [Parameter(Mandatory)] [string] $Destination,
   # don't copy office\ (and remove it from the destination)
-  [switch] $SkipOffice
+  [switch] $SkipOffice,
+  # Dell Command | Configure's X86_64 folder (cctk.exe and its DLLs), copied to dell\X86_64
+  [string] $DellCctk
 )
 
 Set-StrictMode -Version Latest
@@ -43,6 +53,12 @@ try {
   }
   if (-not (Test-Path (Join-Path $Source '.postinstall'))) { throw "$Source has no .postinstall folder." }
   if (-not (Test-Path $Destination -PathType Container)) { throw "$Destination not found." }
+  if ($DellCctk) {
+    $CctkExe = Join-Path $DellCctk 'cctk.exe'
+    if (-not (Test-Path $CctkExe)) { throw "$DellCctk has no cctk.exe; give the X86_64 folder of Dell Command | Configure." }
+    $Signature = Get-AuthenticodeSignature -LiteralPath $CctkExe
+    if ($Signature.Status -ne 'Valid' -or $Signature.SignerCertificate.Subject -notmatch '(^|, )O=Dell') { throw "$CctkExe is not validly signed by Dell ($($Signature.Status))." }
+  }
 
   $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
   foreach ($Name in '.postinstall', 'virtio', 'office') {
@@ -56,6 +72,12 @@ try {
     # /MT: several files at once, which matters for Office's large files on fast drives
     $Output = & robocopy.exe $From $To /MIR /MT:8 /R:2 /W:5 /NFL /NDL /NJH /NP
     if ($LASTEXITCODE -ge 8) { throw "robocopy $From -> $To failed with exit code $($LASTEXITCODE): $(($Output | Where-Object { $_.Trim() } | Select-Object -Last 5) -join ' | ')" }
+  }
+  if ($DellCctk) {
+    $To = Join-Path $Destination 'dell\X86_64'
+    Write-Host "Copying Dell Command | Configure's cctk ($((Get-Item $CctkExe).VersionInfo.FileVersion)) to $To..."
+    $Output = & robocopy.exe $DellCctk $To /MIR /R:2 /W:5 /NFL /NDL /NJH /NP
+    if ($LASTEXITCODE -ge 8) { throw "robocopy $DellCctk -> $To failed with exit code $($LASTEXITCODE): $(($Output | Where-Object { $_.Trim() } | Select-Object -Last 5) -join ' | ')" }
   }
   Write-Host "Done in $([math]::Round($Stopwatch.Elapsed.TotalMinutes, 1)) minutes."
 }
