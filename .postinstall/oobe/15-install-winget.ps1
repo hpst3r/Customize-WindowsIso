@@ -1,5 +1,11 @@
 $progressPreference = 'silentlyContinue'
 
+# WinGet needs App Installer (AppX), which Server Core doesn't have
+if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').InstallationType -eq 'Server Core') {
+  Write-Host 'Server Core: WinGet is not supported; skipping.'
+  return
+}
+
 # without the internet, Install-Module stops at an interactive "NuGet provider is
 # required" prompt and first logon hangs there, so check first
 try {

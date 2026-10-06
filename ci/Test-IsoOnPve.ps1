@@ -135,10 +135,11 @@ try {
     capabilities = @(if ($ImageProfile) { $ImageProfile.Packages.WindowsCapabilitiesToRemove })
     registry     = $Registry
     drivers      = $Drivers
-    winget       = $(if ($WinGet) { $WinGet.after })
-    defender     = $(if ($Defender) { $Defender.after })
+    # (not $(if ...): with nothing to return it serializes as {}, which reads as "expected")
+    winget       = if ($WinGet) { $WinGet.after } else { $null }
+    defender     = if ($Defender) { $Defender.after } else { $null }
     software     = @(Get-CiValue (Get-CiValue $Ci 'ExpectSoftware') $InstallType @())
-    office       = $(if ($OfficeWanted -and $OfficeOnMedia) { [ordered]@{ version = $OfficeOnMedia; product = "$($OfficeXml.Configuration.Add.Product.ID)"; channel = $Channel; channelId = $ChannelIds[$Channel] } })
+    office       = if ($OfficeWanted -and $OfficeOnMedia) { [ordered]@{ version = $OfficeOnMedia; product = "$($OfficeXml.Configuration.Add.Product.ID)"; channel = $Channel; channelId = $ChannelIds[$Channel] } } else { $null }
   }
   $Expected | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 (Join-Path $OutDir 'expected.json')
   #endregion
@@ -187,11 +188,15 @@ try {
     $Value = $Answer.CreateElement('Value', $U); $Value.InnerText = "$($Image.Index)"; $MetaData.AppendChild($Value) | Out-Null
     $InstallFrom.AppendChild($MetaData) | Out-Null
     $OsImage.PrependChild($InstallFrom) | Out-Null
-    $Writer = New-Object System.IO.StringWriter
-    $Answer.Save($Writer)
-    $Answer.Save((Join-Path $OutDir 'autounattend-ci.xml'))
+    # saved to a file and sent as is: XmlDocument.Save to a StringWriter declares
+    # encoding="utf-16" over what goes out as UTF-8, and Server 2022's Setup then ignores
+    # the answer file (newer Setup tolerates it)
+    $AnswerPath = Join-Path $OutDir 'autounattend-ci.xml'
+    $Answer.Save($AnswerPath)
+    $AnswerText = [IO.File]::ReadAllText($AnswerPath)
+    if ($AnswerText -notmatch '<\?xml[^>]*encoding="utf-8"') { throw "autounattend-ci.xml doesn't declare UTF-8" }
 
-    Invoke-Pve "$StripBom > $Folder/autounattend.xml" -InputText $Writer.ToString() | Out-Null
+    Invoke-Pve "$StripBom > $Folder/autounattend.xml" -InputText $AnswerText | Out-Null
     Write-Step "answer file for edition $($Image.Index) ($($Image.Name)) on $TestIso."
   }
   # -J: Joliet, for long lowercase names

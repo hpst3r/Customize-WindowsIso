@@ -272,6 +272,9 @@ Invoke-Check 'winget: App Installer' {
   # the build records the bundle version (e.g. 2026.917.151.0), which is what is provisioned;
   # the package installed for a user has the app's own version (e.g. 1.29.379.0)
   $Want = Get-Value $Expected 'winget'
+  if (-not (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue) -or $Os.InstallationType -eq 'Server Core') {
+    Add-Check 'winget: App Installer' 'Info' 'no AppX on Server Core'; return
+  }
   $Installed = @(Get-AppxPackage -AllUsers -Name Microsoft.DesktopAppInstaller -ErrorAction SilentlyContinue | Sort-Object { [version] $_.Version } -Descending)
   $Provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object DisplayName -eq 'Microsoft.DesktopAppInstaller' | Sort-Object { [version] $_.Version } -Descending)
   $Facts.appInstaller = "provisioned $(if ($Provisioned) { $Provisioned[0].Version } else { 'none' }), installed $(if ($Installed) { $Installed[0].Version } else { 'none' })"
