@@ -177,7 +177,8 @@ Invoke-Check 'network: internet' {
 Invoke-Check 'virtio: guest tools' {
   $Service = Get-Service -Name 'QEMU-GA' -ErrorAction SilentlyContinue
   $Package = @(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue |
-      Where-Object { (Get-Value $_ 'DisplayName') -like 'Virtio-win-guest-tools*' })
+      # the all-in-one installer, or its drivers MSI installed on its own
+      Where-Object { (Get-Value $_ 'DisplayName') -like 'Virtio-win*' })
   if ($Service -and $Service.Status -eq 'Running' -and $Package) { Add-Check 'virtio: guest tools' 'Pass' "$($Package[0].DisplayName) $($Package[0].DisplayVersion), QEMU-GA running" }
   else { Add-Check 'virtio: guest tools' 'Fail' "guest tools package: $([bool]$Package), QEMU-GA: $(if ($Service) { $Service.Status } else { 'missing' })" }
 }

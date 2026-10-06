@@ -129,22 +129,28 @@ try {
         }
         if (-not ($Volume -and $Volume.DriveLetter)) { throw "New-PostinstallIso: $VirtIOIsoPath mounted but no drive letter was assigned." }
 
-        $GuestTools = "$($Volume.DriveLetter):\virtio-win-guest-tools.exe"
-        if (-not (Test-Path $GuestTools)) { throw "New-PostinstallIso: virtio-win-guest-tools.exe not found on $VirtIOIsoPath." }
-        # upstream (Fedora) builds of the installer are unsigned; RHEL builds are signed.
-        # Either is fine, but a signature that no longer matches means the file was modified.
-        $Signature = Get-AuthenticodeSignature $GuestTools
-        if ($Signature.Status -notin 'Valid', 'NotSigned') {
-          throw "New-PostinstallIso: virtio-win-guest-tools.exe has a bad signature ($($Signature.Status)); refusing to use it."
-        }
-
+        $Root = "$($Volume.DriveLetter):\"
+        if (-not (Test-Path "$Root\virtio-win-guest-tools.exe")) { throw "New-PostinstallIso: virtio-win-guest-tools.exe not found on $VirtIOIsoPath." }
         New-Item -ItemType Directory -Force -Path $VirtIODir | Out-Null
-        Copy-Item $GuestTools $VirtIODir -Force
-        # the OOBE script checks an unsigned installer against this before running it
-        $GuestToolsHash = (Get-FileHash -Algorithm SHA256 (Join-Path $VirtIODir 'virtio-win-guest-tools.exe')).Hash.ToLowerInvariant()
-        Set-Content -Encoding ascii -NoNewline -Path (Join-Path $VirtIODir 'virtio-win-guest-tools.exe.sha256') -Value $GuestToolsHash
         $VirtIOLabel = $Volume.FileSystemLabel
-        Write-Host "New-PostinstallIso: added virtio-win-guest-tools.exe from $VirtIOLabel ($($Signature.Status), sha256 $GuestToolsHash)."
+        # the bundle, and its two MSIs for installing the drivers and the guest agent separately
+        # (a failing guest agent makes the bundle roll back the drivers too, network included)
+        foreach ($Relative in 'virtio-win-guest-tools.exe', 'virtio-win-gt-x64.msi', 'guest-agent\qemu-ga-x86_64.msi') {
+          $File = Join-Path $Root $Relative
+          if (-not (Test-Path $File)) { Write-Warning "New-PostinstallIso: $Relative not found on $VirtIOIsoPath."; continue }
+          # upstream (Fedora) builds of the installers are unsigned; RHEL builds are signed.
+          # Either is fine, but a signature that no longer matches means the file was modified.
+          $Signature = Get-AuthenticodeSignature $File
+          if ($Signature.Status -notin 'Valid', 'NotSigned') {
+            throw "New-PostinstallIso: $Relative has a bad signature ($($Signature.Status)); refusing to use it."
+          }
+          $Leaf = Split-Path -Leaf $Relative
+          Copy-Item $File $VirtIODir -Force
+          # the OOBE script checks an unsigned installer against this before running it
+          $Hash = (Get-FileHash -Algorithm SHA256 (Join-Path $VirtIODir $Leaf)).Hash.ToLowerInvariant()
+          Set-Content -Encoding ascii -NoNewline -Path (Join-Path $VirtIODir "$Leaf.sha256") -Value $Hash
+          Write-Host "New-PostinstallIso: added $Leaf from $VirtIOLabel ($($Signature.Status), sha256 $Hash)."
+        }
       }
       finally {
         if ($MountedHere) { Dismount-DiskImage -ImagePath $VirtIOIsoPath | Out-Null }
