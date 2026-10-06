@@ -107,7 +107,7 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
   - Under StrictMode, single results unroll to scalars.
   - `-not @(0)` is true.
   - `[1]` in `-like` is a character class.
-- **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"). Run those tests as SYSTEM via a scheduled task.
+- **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"; DISM: "An initialization error occurred", `get_OSVersion` 0x80070057 right after a good mount). That includes shells started by a packaged desktop app (MSIX). Run builds and those tests as SYSTEM via a scheduled task.
 - **Windows OpenSSH as SYSTEM** refuses a private key owned by, or granting access to, an individual user ("bad permissions"). Own it by Administrators; grant only SYSTEM and Administrators.
 - **`qm guest exec --pass-stdin` times out** against the Windows guest agent. Write data into the guest with the agent's file-write (`pvesh create .../agent/file-write`) and exec without stdin.
 - **.NET writes a UTF-8 BOM to a child's stdin** before your data; strip it on the receiving side.
