@@ -71,9 +71,9 @@ local admin by itself.
 
 ## 5. First logon: pick the client
 
-The first-logon stub opens a PowerShell console and shows the client picker. Windows 11 opens the
-Start menu over it at the first sign-in; the picker takes the keyboard focus back (and the Start
-menu closes) as soon as it's waiting for a key:
+The first-logon stub opens a PowerShell console and shows the client picker. (Windows 11 opens the
+Start menu at the first sign-in, on top of it and with the keyboard focus; the picker closes it
+again, so the keys reach the menu.)
 
 ![The client picker](images/firstlogon-client-picker.png)
 

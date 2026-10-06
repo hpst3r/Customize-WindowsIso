@@ -119,4 +119,6 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
 - **Single quotes in a scheduled task's `powershell -File` arguments are passed literally** (`-Name 'X*'` filters for `'X*'`).
 - **Disk-image mounts are machine-wide:** whoever mounts the virtio-win ISO may have it dismounted by another script (now a named mutex).
 - **Filtering processes by command line also matches the shell running the filter.** Exclude `$PID`.
+- **Windows 11 opens the Start menu at the first sign-in, over the first-logon console, with the keyboard focus.** `SetForegroundWindow` from the console is refused (even with the Alt trick); sending Esc while the foreground window belongs to `StartMenuExperienceHost` closes Start and the focus returns.
+- **A PowerShell list of one pair (`@(@('a','b'))`) unrolls to the pair itself.** Bulk replacements written that way replaced single characters; build such lists with `,@('a','b')` or use the Edit tool.
 - **fedorapeople.org directory listings are behind a browser challenge,** but direct file links download fine.
