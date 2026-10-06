@@ -29,7 +29,7 @@ while ($true) {
     }
     finally { $Stream.Dispose() }
   }
-  # one more pass after z-wait-for-interaction.ps1 closed the transcript
+  # one more pass after z-9-wait-for-interaction.ps1 closed the transcript
   if (Test-Path $Done) { if (-not $Until) { $Until = (Get-Date).AddSeconds(4) } elseif ((Get-Date) -gt $Until) { break } }
   Start-Sleep -Seconds 2
 }

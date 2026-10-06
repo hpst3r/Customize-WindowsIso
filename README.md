@@ -179,13 +179,21 @@ runs the scripts in every folder on the way down to it:
 
 Keys: arrows to move and expand/collapse, a letter to jump, Enter to select (it lists the
 scripts and asks again before running), Esc to run nothing. With no subfolders, the
-top-level scripts run without a menu, as before.
+top-level scripts run without a menu, as before. Scripts named `z-*` (in any of the folders)
+run after all the others, so the common `z-1-wait-for-office.ps1` and
+`z-9-wait-for-interaction.ps1` come after the client's scripts. Windows 11 opens the Start menu
+over the console at the first sign-in; while the menu waits for a key it takes the keyboard
+focus back.
+
+The full guide, with screenshots of an install, is in [docs/](docs/README.md).
 
 ## Post-install scripts for VMs (`postinstall-client.iso`, `postinstall-server.iso`)
 
-For virtual machines, `New-PostinstallIso.ps1` packs the repo's `.postinstall` folder into a
-non-bootable ISO to attach as a second CD-ROM. The runner builds two into the output directory
-each run (`BuildPostinstallIso` in `runner-config.json`), each only rebuilt when its contents change:
+For virtual machines, `New-PostinstallIso.ps1` packs the repo's `.postinstall` folder (or
+`PostinstallSource` from `runner-config.json`: a private copy for client scripts with credentials,
+since this repository is public) into a non-bootable ISO to attach as a second CD-ROM. The runner
+builds two into the output directory each run (`BuildPostinstallIso` in `runner-config.json`), each
+only rebuilt when its contents change:
 
 | ISO | Contents | Attach to |
 |---|---|---|
@@ -224,7 +232,7 @@ Client images install Microsoft 365 Apps (Office) at first logon, from the post-
   the cached build. Office doesn't affect the images, so a new build doesn't rebuild them.
 - **At first logon**, `.postinstall\oobe\06-start-office-install.ps1` starts the install from
   `office\` on the post-install drive in the background, so it overlaps the other scripts
-  (WinGet, software), and `y-wait-for-office.ps1` waits for it before the final prompt, so the
+  (WinGet, software), and `z-1-wait-for-office.ps1` waits for it before the final prompt, so the
   drive isn't pulled while Office still reads from it. From a local SSD this is the fastest way
   to install it. Anything missing from `office\` comes from Microsoft's CDN (`AllowCdnFallback`),
   and without `office\` on any drive, the script downloads the ODT and installs from the CDN.

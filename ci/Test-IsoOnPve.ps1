@@ -115,7 +115,10 @@ try {
   $OfficeWanted = [bool] @($Registry | Where-Object Name -eq 'OfficeOnFirstLogon').Count
   $CiMediaManifest = Get-Content -Raw "$CiMediaPath.json" | ConvertFrom-Json
   $OfficeOnMedia = Get-CiValue $CiMediaManifest 'office'
-  [xml] $OfficeXml = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot) '.postinstall\office\configuration.xml')
+  $Runner = Get-Content -Raw $Ci.RunnerConfigFile | ConvertFrom-Json
+  $PostinstallSource = Get-CiValue $Runner 'PostinstallSource' ''
+  if (-not $PostinstallSource) { $PostinstallSource = Join-Path (Split-Path $PSScriptRoot) '.postinstall' }
+  [xml] $OfficeXml = Get-Content -Raw (Join-Path $PostinstallSource 'office\configuration.xml')
   $Channel = "$($OfficeXml.Configuration.Add.Channel)"
   $ChannelIds = @{ Current = '492350f6-3a01-4f97-b9c0-c7c6ddf67d60'; MonthlyEnterprise = '55336b82-a18d-4dd6-b5f6-9e5095c314a6'; SemiAnnual = '7ffbc6bf-bc32-4f92-8982-f9dd17fd3114'
     CurrentPreview = '64256afe-f5d9-4f86-8936-8840a6a4f5be'; SemiAnnualPreview = 'b8f9b850-328d-4355-9145-c59439a0c4cf'; BetaChannel = '5440fd1f-7ecb-4221-8110-145efaa6372f' }
