@@ -605,8 +605,11 @@ finally {
   # index.html/index.json in the output directory, whatever happened to the builds
   if ($Acquired -and (Get-ConfigValue $Config 'BuildIndex' $true) -and (Test-Path $Config.OutputDirectory)) {
     try {
+      # the install tests' history, if they are set up (ci\ci-config.json)
+      $CiConfigFile = Join-Path $PSScriptRoot 'ci\ci-config.json'
+      $InstallTests = if (Test-Path $CiConfigFile) { Join-Path (Get-Content -Raw $CiConfigFile | ConvertFrom-Json).WorkDirectory 'tests.json' } else { '' }
       & (Join-Path $PSScriptRoot 'New-ImageIndex.ps1') -OutputDirectory $Config.OutputDirectory -SourceDirectory $Config.InputDirectory `
-        -RunSummaryPath (Join-Path $LogDir 'last-run-runner.json')
+        -RunSummaryPath (Join-Path $LogDir 'last-run-runner.json') -InstallTestsPath $InstallTests
       if ($LASTEXITCODE -ne 0) { throw "New-ImageIndex.ps1 exited with $LASTEXITCODE" }
     }
     catch {

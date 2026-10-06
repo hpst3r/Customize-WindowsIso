@@ -28,8 +28,13 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 - **WinPE disk picker:** built, **off by default** (`iso.DiskPicker`).
 - **Ops:** notifications (ntfy and SMTP relay), keeping the previous ISO, the share index, optional deletion of source ISOs with stale detection, and `Test-CustomizedIso.ps1`.
 - **ESD output:** optional (`install.Format`).
+- **Install tests:** `ci\Invoke-ImageTests.ps1` installs every image on the Proxmox test node and checks the running machine (see item 2 below). All seven images pass as of 2026-10-06.
 
 ## Open decisions
+
+- [ ] **Per-user ContentDeliveryManager values don't stick** (found by the install tests on 25H2, 26H2 and 29xxx): Windows sets `ContentDeliveryAllowed` back to 1 and recreates `ContentDeliveryManager\Subscriptions` for each new user at first logon, whatever the Default profile says. The other 19 values in that group and the policy groups hold. Options: accept it, or set those two per user at logon (Active Setup or a logon task). On Pro the matching policies aren't honored.
+- [ ] **BitLocker device encryption:** Windows 11 24H2+ turns on automatic device encryption at install on machines with a TPM and Secure Boot, Pro included (the test VMs' disks are encrypted). Without a Microsoft account sign-in the key isn't escrowed anywhere. Decide whether RMM manages it, or set `PreventDeviceEncryption` in a profile.
+- [ ] **SPICE agent:** the VirtIO guest tools are now installed as two MSIs (drivers, guest agent), which leaves out the SPICE agent the all-in-one installer added. Only matters for SPICE consoles.
 
 - [ ] **Notifications:** create `notify.json` from `notify.example.json` (ntfy server/topic and/or SMTP relay on 587 with STARTTLS). Store secrets with `Set-NotificationSecret.ps1`; the task already has the notification step.
 - [ ] **`DeleteSourceAfterBuild`** (currently `false`): saves about 60 GB, but any change to the customization makes every image need a re-download (about 7–8 h for all). Turn it on once changes settle.
@@ -38,7 +43,7 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 ## Next
 
 ### 1. Test node (Proxmox, separate from prod)
-A dedicated PVE node is coming. Use it for:
+The dedicated node is `llm-pve` (see item 2). Manual cases still to run there:
 - **Disk picker, single virtio-scsi disk:** fully unattended install. Check that `C:\Windows\Panther\unattend.xml` targets disk 0.
 - **Disk picker, two disks:** the menu appears; pick disk 1; disk 0 is untouched; the `S` key opens Setup's own disk page.
 - **Disk picker, USB disk attached:** the USB disk is never offered.
@@ -50,15 +55,20 @@ A dedicated PVE node is coming. Use it for:
 
 Full disk-picker steps are in the README.
 
-### 2. Automated install test (#1)
-After each weekly run, on the test node:
-1. Boot each new ISO with `postinstall-client.iso` or `postinstall-server.iso` in a throwaway VM (virtio-scsi, no TPM).
-2. Wait for the QEMU guest agent.
-3. Check the build, the account, the network, that the removed apps are absent, and (clients) that Office installed.
-4. Destroy the VM.
-5. Report through the notification step.
+### 2. Automated install test (#1): built
+`ci\Invoke-ImageTests.ps1` on `llm-pve` (node `800g4m`, PVE 9.2, i5-8500, 16 GB), over SSH; see the README. A full run (all seven images) takes about 2.5 hours; one image 10-25 minutes. To do:
+- [ ] Register it in the weekly task (after merging): `register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso -InstallTests`.
+- [ ] Known issue to recheck with each virtio-win release: the QEMU guest agent doesn't install on Insider 29xxx (its VSS provider fails to register); `KnownIssues` in `ci\ci-config.json`.
+- [ ] More cases: the disk picker (item 1), the other Server editions, BIOS/SeaBIOS boot, a second disk.
 
-Needs a Proxmox API token scoped to the test node.
+What the first runs found and fixed:
+- Six of seven published ISOs predated the VirtIO driver sets, so Setup saw no disk on virtio-scsi (rebuilt).
+- First logon hung at an interactive NuGet prompt when the network was down (`15-install-winget.ps1`).
+- On Insider 29xxx the guest agent's MSI fails, and the all-in-one guest tools installer then rolled back the drivers too, leaving the machine without network (now two MSIs).
+- The sample `10-create-user.ps1` password fails Server's complexity policy: no account, no autologon, first logon stuck at Ctrl-Alt-Del (documented; it warns now).
+- WinGet scripts errored on Server Core, where WinGet isn't supported (they skip now).
+- `Set-GeckoExtension.ps1` errored on every fresh machine (fixed).
+- A build and `New-PostinstallIso.ps1` running at once could detach the virtio-win ISO from under each other (named mutex).
 
 ### 3. Switch Dell storage to AHCI from WinPE
 Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run AHCI for performance anyway).
@@ -99,4 +109,14 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
   - `-not @(0)` is true.
   - `[1]` in `-like` is a character class.
 - **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"). Run those tests as SYSTEM via a scheduled task.
+- **Windows OpenSSH as SYSTEM** refuses a private key owned by, or granting access to, an individual user ("bad permissions"). Own it by Administrators; grant only SYSTEM and Administrators.
+- **`qm guest exec --pass-stdin` times out** against the Windows guest agent. Write data into the guest with the agent's file-write (`pvesh create .../agent/file-write`) and exec without stdin.
+- **.NET writes a UTF-8 BOM to a child's stdin** before your data; strip it on the receiving side.
+- **QEMU HMP `screendump`** takes the filename first: `screendump /tmp/x.png -f png`.
+- **A USB disk on an OVMF VM makes the firmware read the boot DVD extremely slowly** (Setup takes most of an hour to boot). Put extra files on another DVD instead.
+- **`XmlDocument.Save(StringWriter)` declares `encoding="utf-16"`**; sent as UTF-8, Server 2022 Setup ignores that answer file. Save to a file.
+- **`$(if ...)` inside a hashtable literal** serializes "nothing" as `{}`, which is truthy. Write `if (...) { x } else { $null }`.
+- **Single quotes in a scheduled task's `powershell -File` arguments are passed literally** (`-Name 'X*'` filters for `'X*'`).
+- **Disk-image mounts are machine-wide:** whoever mounts the virtio-win ISO may have it dismounted by another script (now a named mutex).
+- **Filtering processes by command line also matches the shell running the filter.** Exclude `$PID`.
 - **fedorapeople.org directory listings are behind a browser challenge,** but direct file links download fine.

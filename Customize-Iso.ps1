@@ -510,8 +510,16 @@ function Get-TargetDriverSets([string] $Target) {
   @($script:DriverSets | Where-Object { $_.Targets -contains $Target })
 }
 
-# Attach virtio-win ISOs (unless they already are) and note each set's root
+# Attach virtio-win ISOs (unless they already are) and note each set's root. A mount is
+# machine-wide, so New-PostinstallIso.ps1 (which also mounts the virtio-win ISO) waits for
+# this mutex instead of detaching the ISO from under a build; Close-DriverSets releases it.
+$script:VirtIOMutex = $null
 function Open-DriverSets {
+  if (@($script:DriverSets | Where-Object Type -eq 'virtio-iso').Count) {
+    $script:VirtIOMutex = New-Object System.Threading.Mutex($false, 'Global\Customize-WindowsIso-VirtIOIso')
+    try { if (-not $script:VirtIOMutex.WaitOne([TimeSpan]::FromHours(3))) { throw 'Open-DriverSets: the virtio-win ISO stayed in use by another process for 3 hours.' } }
+    catch [System.Threading.AbandonedMutexException] { }
+  }
   foreach ($Set in $script:DriverSets) {
     $Set | Add-Member -NotePropertyMembers @{ Root = $null; Label = $Set.Name; MountedHere = $false; PerOs = $false }
     if ($Set.Type -eq 'virtio-iso') {
@@ -538,6 +546,11 @@ function Open-DriverSets {
 function Close-DriverSets {
   foreach ($Set in @($script:DriverSets | Where-Object { $_.PSObject.Properties['MountedHere'] -and $_.MountedHere })) {
     try { Dismount-DiskImage -ImagePath $Set.Path | Out-Null; $Set.MountedHere = $false } catch { Write-Warning "cleanup: $_" }
+  }
+  if ($script:VirtIOMutex) {
+    try { $script:VirtIOMutex.ReleaseMutex() } catch { }
+    $script:VirtIOMutex.Dispose()
+    $script:VirtIOMutex = $null
   }
 }
 

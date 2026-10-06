@@ -2,8 +2,8 @@
 
 <#
 .SYNOPSIS
-Sends one notification summarizing the weekly build: Get-WindowsIso's stub.ps1
-and runner.ps1, from their run summaries.
+Sends one notification summarizing the weekly build: Get-WindowsIso's stub.ps1,
+runner.ps1 and (with -IncludeInstallTests) the install tests, from their run summaries.
 
 .DESCRIPTION
 Runs as the last action of the weekly task (see register-task.ps1). Channels are
@@ -41,6 +41,10 @@ param (
   [string] $RunnerSummaryPath,
   # default: runner-config.json next to this script
   [string] $RunnerConfigFile,
+  # also report the install tests (ci\Invoke-ImageTests.ps1); register-task.ps1 -InstallTests passes it
+  [switch] $IncludeInstallTests,
+  # default: CiSummaryPath in notify.json, else last-run-ci.json in runner-config.json's LogDirectory
+  [string] $CiSummaryPath,
   # send on every enabled channel regardless of Send, with "[test]" in the title
   [switch] $Test,
   # print the message instead of sending it
@@ -128,6 +132,7 @@ function New-Report($Stages, [bool] $Detailed) {
     })
   $Rebuilt = @($Runner | ForEach-Object { Get-Items $_ } | Where-Object { $_.result -eq 'Built' -and $_.name -like '*.iso' -and $_.name -notlike 'postinstall*.iso' })
   $NewBuilds = @($Stub | ForEach-Object { Get-Items $_ } | Where-Object result -eq 'Published')
+  $Tested = @($Stages | Where-Object Stage -eq 'ci' | ForEach-Object { Get-Items $_ } | Where-Object result -eq 'Passed')
 
   $Outcome = if ($Failed.Count -or $StageProblems.Count) { 'FAILED' } elseif ($Stale.Count) { 'ACTION NEEDED' } else { 'OK' }
 
@@ -135,12 +140,13 @@ function New-Report($Stages, [bool] $Detailed) {
   if ($Failed.Count -or $StageProblems.Count) { $Counts += "$($Failed.Count + $StageProblems.Count) failed" }
   if ($Stale.Count) { $Counts += "$($Stale.Count) stale" }
   if ($Rebuilt.Count) { $Counts += "$($Rebuilt.Count) rebuilt" }
+  if ($Tested.Count) { $Counts += "$($Tested.Count) install-tested" }
   if (-not $Counts) { $Counts += 'no changes' }
   $Title = "Windows images: $Outcome ($($Counts -join ', '))"
 
   $Lines = [System.Collections.Generic.List[string]]::new()
   foreach ($Stage in $Stages) {
-    $Name = if ($Stage.Stage -eq 'stub') { 'Get-WindowsIso' } else { 'Customize-WindowsIso' }
+    $Name = switch ($Stage.Stage) { 'stub' { 'Get-WindowsIso' } 'ci' { 'Install tests' } default { 'Customize-WindowsIso' } }
     if ($Stage.Problem) {
       $Lines.Add("$($Name): FAILED - $($Stage.Problem)")
       $Lines.Add('')
@@ -148,7 +154,7 @@ function New-Report($Stages, [bool] $Detailed) {
     }
     $S = $Stage.Summary
     $Items = @(Get-Items $Stage)
-    $Labels = [ordered]@{ Failed = 'failed'; Locked = 'locked'; Stale = 'stale'; Published = 'new'; Built = 'rebuilt'; UpToDate = 'up to date' }
+    $Labels = [ordered]@{ Failed = 'failed'; Locked = 'locked'; Stale = 'stale'; Published = 'new'; Built = 'rebuilt'; Passed = 'passed'; UpToDate = 'up to date' }
     $StageCounts = @(foreach ($Result in $Labels.Keys) {
         $Count = @($Items | Where-Object result -eq $Result).Count
         if ($Count) { "$Count $($Labels[$Result])" }
@@ -175,11 +181,18 @@ function New-Report($Stages, [bool] $Detailed) {
           "  OK     $($Item.name)$(if ($Build) { ": $Build" })"
         }
         'Stale' { "  STALE  $($Item.name): $($Item.status -replace '^Stale:\s*', '')" }
+        'Passed' { "  PASSED $($Item.name): $(Get-ConfigValue $Item 'summary' '') ($($Item.minutes) min)" }
         default { "  FAILED $($Item.name): $($Item.status)$(if ($Item.minutes) { " after $($Item.minutes) min" })" }
       }
       $Lines.Add($Line)
       if ($Detailed -and $Item.result -eq 'Built') {
         foreach ($Warning in @(Get-ConfigValue $Item 'warningMessages' @())) { $Lines.Add("           warning: $Warning") }
+      }
+      if ($Detailed -and $Stage.Stage -eq 'ci' -and $Item.result -in 'Passed', 'Failed') {
+        foreach ($Failure in @(Get-ConfigValue $Item 'failures' @())) { $Lines.Add("           fail: $Failure") }
+        foreach ($Warning in @(Get-ConfigValue $Item 'warnings' @())) { $Lines.Add("           warn: $Warning") }
+        if (Get-ConfigValue $Item 'vmKept' $false) { $Lines.Add('           the VM was kept (stopped) on the test node') }
+        if (Get-ConfigValue $Item 'directory') { $Lines.Add("           results: $($Item.directory)") }
       }
     }
     $Lines.Add('')
@@ -282,9 +295,12 @@ try {
     if (-not $RunnerSummaryPath) { $RunnerSummaryPath = Get-ConfigValue $Config 'RunnerSummaryPath' (Join-Path $LogDir 'last-run-runner.json') }
     $MaxAge = [double](Get-ConfigValue $Config 'MaxSummaryAgeHours' 24)
 
+    if (-not $CiSummaryPath) { $CiSummaryPath = Get-ConfigValue $Config 'CiSummaryPath' (Join-Path $LogDir 'last-run-ci.json') }
+
     $Stages = @(
       if ($StubSummaryPath) { Read-Summary 'stub' $StubSummaryPath $MaxAge }
       Read-Summary 'runner' $RunnerSummaryPath $MaxAge
+      if ($IncludeInstallTests) { Read-Summary 'ci' $CiSummaryPath $MaxAge }
     )
 
     $Channels = @(

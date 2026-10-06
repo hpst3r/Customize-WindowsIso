@@ -9,7 +9,8 @@ Built from the manifests Customize-Iso.ps1 writes beside each ISO: editions and
 versions, build date, size, SHA-256, removed packages, drivers, warnings, the
 kept previous ISO (<name>.previous.iso), and the postinstall*.iso media. With
 -SourceDirectory it adds the source build from Get-WindowsIso's <name>.iso.json,
-and with -RunSummaryPath (last-run-runner.json) each image's status in the last run.
+and with -RunSummaryPath (last-run-runner.json) each image's status in the last run,
+and with -InstallTestsPath (ci\Invoke-ImageTests.ps1's tests.json) its last install test.
 
 The page is self-contained (no external resources) and works on a phone. Both
 files are written beside the target and then swapped in, so a client never
@@ -27,6 +28,8 @@ param (
   [string] $SourceDirectory,
   # runner.ps1's last-run-runner.json, for each image's status in the last run
   [string] $RunSummaryPath,
+  # ci\Invoke-ImageTests.ps1's history (tests.json), for each image's last install test
+  [string] $InstallTestsPath,
   [string] $Title = 'Windows images'
 )
 
@@ -124,6 +127,11 @@ function New-ImageCard($Entry) {
     $Html.Add("<table><thead><tr><th>#</th><th>Edition</th><th>Version</th></tr></thead><tbody>$Rows</tbody></table>")
   }
   if ($Entry.sha256) { $Html.Add((New-ShaLine $Entry.sha256)) }
+  foreach ($Test in @(Get-ConfigValue $Entry 'installTests' @())) {
+    $Of = if ($Test.current) { '' } else { ' (of an earlier build of this ISO)' }
+    $Class = if ($Test.result -eq 'Pass') { 'line' } elseif ($Test.current) { 'note bad' } else { 'note warn' }
+    $Html.Add("<p class=`"$Class`">$(ConvertTo-Html "Install test, $($Test.edition): $(if ($Test.result -eq 'Pass') { 'passed' } else { 'FAILED' }) $($Test.finished)$Of - $($Test.summary)")</p>")
+  }
   $Facts = @(
     $(if ($Entry.format) { "format $($Entry.format)" }),
     $(if ($Entry.virtio) { "drivers from $($Entry.virtio)" }),
@@ -229,6 +237,7 @@ try {
   if (-not (Test-Path $OutputDirectory -PathType Container)) { throw "New-ImageIndex: $OutputDirectory does not exist." }
   $Summary = Read-JsonFile $RunSummaryPath
   $RunItems = @(Get-ConfigValue $Summary 'items' @())
+  $InstallTests = Read-JsonFile $InstallTestsPath
 
   $Files = @(Get-ChildItem -Path $OutputDirectory -Filter '*.iso' -File |
       Where-Object { $_.Extension -eq '.iso' -and $_.Name -notlike '*.previous.iso' -and $_.Name -notlike 'postinstall*.iso' } | Sort-Object Name)
@@ -257,6 +266,16 @@ try {
     $Item = $RunItems | Where-Object name -eq $Entry.file | Select-Object -First 1
     $Entry | Add-Member -NotePropertyName lastRun -NotePropertyValue $(if ($Item) {
         [PSCustomObject]@{ result = Get-ConfigValue $Item 'result'; status = Get-ConfigValue $Item 'status' }
+      })
+    # tests.json is keyed "<iso>|<edition>"; current = the test was of this very ISO
+    $Entry | Add-Member -NotePropertyName installTests -NotePropertyValue @(if ($InstallTests) {
+        foreach ($Property in @($InstallTests.PSObject.Properties | Where-Object { $_.Name -like "$($Entry.file)|*" })) {
+          $T = $Property.Value
+          [PSCustomObject]@{
+            edition = ($Property.Name -split '\|', 2)[1]; result = $T.result; finished = $T.finished; summary = $T.summary
+            current = $null -ne $Entry.sha256 -and "$($T.sha256)" -eq "$($Entry.sha256)".ToLowerInvariant()
+          }
+        }
       })
   }
   $Images = @($Images | Sort-Object file)

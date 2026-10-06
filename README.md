@@ -288,11 +288,17 @@ ISO with `-VirtIOIsoPath`/`-VirtIODrivers`.
 
 ### VirtIO (QEMU/KVM, Proxmox)
 
-Besides the drivers in the images, both post-install ISOs get `virtio\virtio-win-guest-tools.exe`
-from the (first) `virtio-iso` set and its SHA-256, and
-`.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs it silently (balloon, serial,
-QEMU guest agent, SPICE agent, the remaining drivers) when the machine has VirtIO devices.
-On anything else it does nothing.
+Besides the drivers in the images, both post-install ISOs get the guest tools from the (first)
+`virtio-iso` set, each with its SHA-256: `virtio\virtio-win-gt-x64.msi` (the remaining drivers
+and services: balloon, serial, ...), `virtio\qemu-ga-x86_64.msi` (the QEMU guest agent) and
+the all-in-one `virtio\virtio-win-guest-tools.exe`. When the machine has VirtIO devices,
+`.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs the drivers MSI and then the
+agent MSI, silently; on anything else it does nothing. They are installed separately because
+the all-in-one installer rolls everything back, drivers and network included, when the agent
+fails (as on Insider 29xxx, where the agent's VSS provider fails to register with
+`VSS_E_UNEXPECTED_PROVIDER_ERROR`). Media
+without the MSIs get the all-in-one installer. On failure the script prints the MSI log lines
+that say why.
 
 The installers in upstream (Fedora) virtio-win builds are unsigned; only the drivers are
 (WHQL), and Windows checks those at install time. So the installer is accepted when building
@@ -411,10 +417,11 @@ image, delete its `.iso.json` and `.iso.sha256.txt` from `InputDirectory` too; o
 it is reported as stale.
 
 `register-task.ps1` registers one weekly task, running as SYSTEM, that runs Get-WindowsIso's
-`stub.ps1`, then `runner.ps1`, then `Send-BuildNotification.ps1` (see Notifications):
+`stub.ps1`, then `runner.ps1`, then (with `-InstallTests`) the install tests on the Proxmox test
+node, then `Send-BuildNotification.ps1` (see Notifications):
 
 ```PowerShell
-.\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso
+.\register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso -InstallTests
 ```
 
 Logs are in `LogDirectory` (default `Y:\IsoBuild\Logs`). Each ISO has its own
@@ -427,6 +434,81 @@ Each run also writes a machine-readable summary to `LogDirectory\last-run-runner
 per ISO the status, `result` (`Built`, `UpToDate`, `Failed`, `Locked`, `Stale`), minutes,
 warnings, and the source build, image versions and editions from the manifests.
 Get-WindowsIso's `stub.ps1` writes the same kind of file to its `logs\last-run-stub.json`.
+
+## Install tests on Proxmox (`ci\`)
+
+`Test-CustomizedIso.ps1` (below) checks what is in an ISO; the install tests check that it
+actually installs and comes up right. `ci\Invoke-ImageTests.ps1` installs each customized ISO
+in a throwaway VM on a dedicated Proxmox VE node, one at a time, and checks the running machine:
+
+1. **Media**: the ISO and the CI post-install media (`ci\New-CiMedia.ps1`: the repo's
+   `.postinstall` with `ci\postinstall` laid over it, plus the VirtIO guest tools and Office)
+   are copied to the node's ISO storage, skipped when the copy there has the same SHA-256.
+   The CI overlay only replaces the two "Press Enter" pauses with completion markers and keeps
+   a transcript of the first-logon scripts; everything else is the real post-install media.
+2. **VM** (`ci\Test-IsoOnPve.ps1`): q35, OVMF with Secure Boot keys, TPM 2.0, virtio-scsi
+   disk, virtio-net, a serial port writing to a file on the node, and three DVDs: the ISO, the
+   CI media, and a small per-test DVD with the expected values and the check script. The ISO's
+   own `autounattend.xml` drives Setup. Multi-edition media would stop at the edition page, so
+   for those the per-test DVD also gets a copy of the ISO's answer file with `/IMAGE/INDEX`
+   added; it sits in the first IDE slot, and Setup reads the first `autounattend.xml` in
+   drive-letter order. (A virtual USB stick would also work, but with a USB disk attached OVMF
+   reads the DVD so slowly that Setup takes ages to boot.) Which editions of multi-edition ISOs
+   are tested: `MultiEditionTest` (default: Datacenter with Desktop Experience).
+3. **Follows** Setup on the console, taking a screenshot every few minutes. Setup keeps
+   showing new things (progress, phases), so nothing new on screen for `StallMinutes` (20)
+   fails the test right away: Setup is waiting at a prompt or an error (e.g. the empty disk
+   list of an ISO without the storage driver) or the boot hangs. The first-logon scripts are
+   followed through the serial port: the CI media streams their transcript there.
+4. **Checks**: at the end of first logon the CI media runs `ci\Test-InstalledWindows.ps1`
+   from the per-test DVD and sends the results over the serial port, so a broken guest agent
+   or network is a failed check, not a test that can't run. They compare the machine with the
+   ISO's manifest and its profile in `config.json`: specialize and first-logon
+   scripts finished without errors; edition, installation type and build; the local admin;
+   WinRE; boot disk on vioscsi and the image's drivers; network and internet; VirtIO guest
+   tools; AppX packages and capabilities removed; every registry group in HKLM and the Default
+   profile (the logged-on user's copy is a warning only, as Windows rewrites some of it);
+   App Installer at least the version the build provisioned; the software the first-logon
+   scripts install with WinGet (`ExpectSoftware`); Microsoft 365 Apps (version, product,
+   channel) on images that should have it and not on the others; Defender platform and engine;
+   critical events since install.
+5. **Reports**: `ResultsDirectory\<iso>-<timestamp>\` gets `result.json`, the expected values,
+   screenshots, the first-logon transcript (`serial-oobe-transcript.log`, which also lists
+   devices without drivers and the network state) and, on failure, Setup's logs (through the
+   guest agent, when it runs). The VM is destroyed,
+   or on failure kept (stopped) for troubleshooting until the next test (`KeepFailedVm`).
+
+An ISO that passed is not tested again until it changes (by SHA-256); failed ones are retried
+every run. The run writes `LogDirectory\last-run-ci.json` for the notification (stage
+"Install tests") and refreshes the index page, which shows each image's last install test.
+
+```PowerShell
+.\ci\Invoke-ImageTests.ps1                    # whatever changed
+.\ci\Invoke-ImageTests.ps1 -Name '*26H2*'      # some ISOs
+.\ci\Invoke-ImageTests.ps1 -Force             # everything
+.\ci\Test-IsoOnPve.ps1 -IsoPath Y:\Images\Customized\WindowsServer2025.iso -Edition 'Windows Server 2025 Standard' -CiMediaPath Y:\IsoBuild\ci\ci-postinstall.iso
+```
+
+`ci\ci-config.json` says where and how: the node (`Host`, `Node`), SSH as root with a
+dedicated key (`SshKey`) and a pinned host key (`KnownHostsFile`), the storages and bridge, the
+VM ID and size, timeouts, and the expectations above. `KnownIssues` turns a failing check into
+a warning with a reason (`Iso` and `Check` are wildcards), for problems that are understood and
+waiting on someone else, so they don't fail every week; remove the entry when it's fixed. Everything goes through `ssh`/`scp` and
+`qm`/`pvesh` on the node. The key and known_hosts live in `Y:\IsoBuild\Secrets`, readable only
+by SYSTEM and Administrators. One test takes about 20-40 minutes; the node needs room for one
+VM (10 GB RAM, a 64 GB thin disk) and three ISOs.
+
+Setting it up on a new node:
+
+```PowerShell
+ssh-keygen -t ed25519 -N '""' -C image-tests -f Y:\IsoBuild\Secrets\pve_ed25519
+# the SYSTEM task's ssh refuses a key owned by (or shared with) an individual user:
+icacls Y:\IsoBuild\Secrets\pve_ed25519 /setowner *S-1-5-32-544
+icacls Y:\IsoBuild\Secrets\pve_ed25519 /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F
+# on the node, in /root/.ssh/authorized_keys: from="<this box's IP>" <contents of pve_ed25519.pub>
+# record the node's host key (check its fingerprint against ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub on the node):
+ssh -i Y:\IsoBuild\Secrets\pve_ed25519 -o UserKnownHostsFile=Y:\IsoBuild\Secrets\known_hosts root@<node> hostname
+```
 
 ## Checking a customized ISO (`Test-CustomizedIso.ps1`)
 

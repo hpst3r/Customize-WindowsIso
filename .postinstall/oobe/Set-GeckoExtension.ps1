@@ -25,7 +25,8 @@ function Set-GeckoExtension {
 
   # Read existing JSON from registry property
 
-  $ExistingJson = (Get-ItemProperty -Path $PolicyPath -Name $ValueName).$ValueName
+  # (absent on a fresh machine)
+  $ExistingJson = (Get-ItemProperty -Path $PolicyPath -Name $ValueName -ErrorAction SilentlyContinue).$ValueName
 
   # Attempt to deserialize. Create a new object if we don't have valid JSON at ExtensionSettings.
   try {
@@ -66,7 +67,7 @@ function Set-GeckoExtension {
 
     $Settings[$ExtensionId].install_url = $InstallUrl
 
-  } else {
+  } elseif ($InstallationMode -eq "force_installed") {
 
     Write-Warning "Extension $($ExtensionId) is being force_installed, but no install URL was specified. Installation will fail!"
 
