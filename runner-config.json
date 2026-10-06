@@ -4,6 +4,7 @@
   "OutputDirectory": "Y:\\Images\\Customized",
   "LogDirectory": "Y:\\IsoBuild\\Logs",
   "RecoveryWimPath": "",
+  "PostinstallSource": "",
   "BuildPostinstallIso": true,
   "PostinstallFolder": "Y:\\Images\\Customized\\postinstall",
   "KeepPrevious": true,

@@ -25,7 +25,7 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 - **Guest tools:** both post-install ISOs carry the VirtIO guest tools and install them silently on VirtIO machines.
 - **Microsoft 365 Apps:** client images install Current Channel Office at first logon from the post-install media (`postinstall-client.iso`, or the folder copied to an SSD), with the CDN as fallback.
 - **Defender:** Microsoft's offline update is applied to every image; a new platform or engine (about monthly) rebuilds.
-- **WinPE disk picker:** built, **off by default** (`iso.DiskPicker`).
+- **WinPE disk picker:** **on** (`iso.DiskPicker`; off by default in the code). Tested on Proxmox VMs with one and two disks. An `autounattend.xml` on another drive overrides it (the install tests rely on this for multi-edition media).
 - **Ops:** notifications (ntfy and SMTP relay), keeping the previous ISO, the share index, optional deletion of source ISOs with stale detection, and `Test-CustomizedIso.ps1`.
 - **ESD output:** optional (`install.Format`).
 - **Install tests:** `ci\Invoke-ImageTests.ps1` installs every image on the Proxmox test node and checks the running machine (see item 2 below). All seven images pass as of 2026-10-06.
@@ -38,14 +38,13 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 
 - [ ] **Notifications:** create `notify.json` from `notify.example.json` (ntfy server/topic and/or SMTP relay on 587 with STARTTLS). Store secrets with `Set-NotificationSecret.ps1`; the task already has the notification step.
 - [ ] **`DeleteSourceAfterBuild`** (currently `false`): saves about 60 GB, but any change to the customization makes every image need a re-download (about 7–8 h for all). Turn it on once changes settle.
-- [ ] **`iso.DiskPicker`:** turn it on after the VM tests below pass.
+- [x] **`iso.DiskPicker`:** on (2026-10-06).
 
 ## Next
 
 ### 1. Test node (Proxmox, separate from prod)
 The dedicated node is `llm-pve` (see item 2). Manual cases still to run there:
-- **Disk picker, single virtio-scsi disk:** fully unattended install. Check that `C:\Windows\Panther\unattend.xml` targets disk 0.
-- **Disk picker, two disks:** the menu appears; pick disk 1; disk 0 is untouched; the `S` key opens Setup's own disk page.
+- **Disk picker, two disks:** done for disk 0 (the docs walkthrough). Still to do: pick disk 1 and check disk 0 is untouched; the `S` key opens Setup's own disk page. (One disk is covered by the weekly install tests.)
 - **Disk picker, USB disk attached:** the USB disk is never offered.
 - **Disk picker, SeaBIOS/MBR:** the BIOS install path works.
 - **Disk picker, Server 2022:** old Setup works with the picker.
@@ -108,7 +107,7 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
   - Under StrictMode, single results unroll to scalars.
   - `-not @(0)` is true.
   - `[1]` in `-like` is a character class.
-- **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"). Run those tests as SYSTEM via a scheduled task.
+- **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"; DISM: "An initialization error occurred", `get_OSVersion` 0x80070057 right after a good mount). That includes shells started by a packaged desktop app (MSIX). Run builds and those tests as SYSTEM via a scheduled task.
 - **Windows OpenSSH as SYSTEM** refuses a private key owned by, or granting access to, an individual user ("bad permissions"). Own it by Administrators; grant only SYSTEM and Administrators.
 - **`qm guest exec --pass-stdin` times out** against the Windows guest agent. Write data into the guest with the agent's file-write (`pvesh create .../agent/file-write`) and exec without stdin.
 - **.NET writes a UTF-8 BOM to a child's stdin** before your data; strip it on the receiving side.
@@ -119,4 +118,6 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
 - **Single quotes in a scheduled task's `powershell -File` arguments are passed literally** (`-Name 'X*'` filters for `'X*'`).
 - **Disk-image mounts are machine-wide:** whoever mounts the virtio-win ISO may have it dismounted by another script (now a named mutex).
 - **Filtering processes by command line also matches the shell running the filter.** Exclude `$PID`.
+- **Windows 11 opens the Start menu at the first sign-in, over the first-logon console, with the keyboard focus.** `SetForegroundWindow` from the console is refused (even with the Alt trick); sending Esc while the foreground window belongs to `StartMenuExperienceHost` closes Start and the focus returns.
+- **A PowerShell list of one pair (`@(@('a','b'))`) unrolls to the pair itself.** Bulk replacements written that way replaced single characters; build such lists with `,@('a','b')` or use the Edit tool.
 - **fedorapeople.org directory listings are behind a browser challenge,** but direct file links download fine.

@@ -1,5 +1,5 @@
 # Starts the Microsoft 365 Apps install in the background, so it runs while the other
-# post-install scripts do; y-wait-for-office.ps1 waits for it to finish.
+# post-install scripts do; z-1-wait-for-office.ps1 waits for it to finish.
 #
 # Only on images whose profile asks for it (config.json's OfficeOnFirstLogon registry group
 # sets HKLM\SOFTWARE\Customize-WindowsIso\Postinstall InstallOffice = 1), and only if Office
@@ -98,5 +98,5 @@ $Process = Start-Process -FilePath $Setup -ArgumentList '/configure', "`"$Config
 # without touching Handle, ExitCode stays empty after the process exits
 $null = $Process.Handle
 
-# for y-wait-for-office.ps1: the stub runs every script in this session
+# for z-1-wait-for-office.ps1: the stub runs every script in this session
 $global:OfficeInstall = [PSCustomObject]@{ Process = $Process; Started = Get-Date; From = $From; LogDir = $LogDir }

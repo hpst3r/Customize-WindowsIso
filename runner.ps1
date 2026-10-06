@@ -66,7 +66,11 @@ $DefenderRebuildOnSignatures = [bool] (Get-ConfigValue $DefenderConfig 'RebuildO
 $OfficeConfig = Get-ConfigValue $Config 'Office'
 $OfficeEnabled = [bool] (Get-ConfigValue $OfficeConfig 'Enabled' $true)
 $OfficeCache = Get-ConfigValue $OfficeConfig 'CacheDirectory' (Join-Path (Split-Path $Config.WorkingDirectory) 'Cache\office')
-$OfficeConfiguration = Join-Path $PSScriptRoot '.postinstall\office\configuration.xml'
+# the post-install scripts: the repo's .postinstall, or a private folder (client scripts often
+# hold credentials, and the repository is public)
+$PostinstallSource = Get-ConfigValue $Config 'PostinstallSource' ''
+if (-not $PostinstallSource) { $PostinstallSource = Join-Path $PSScriptRoot '.postinstall' }
+$OfficeConfiguration = Join-Path $PostinstallSource 'office\configuration.xml'
 # with Office, without (postinstall.iso before the split)
 $PostinstallIsoNames = @('postinstall-client.iso', 'postinstall-server.iso')
 
@@ -576,7 +580,7 @@ try {
         @{ Name = $PostinstallIsoNames[0]; Office = $true; Folder = $PostinstallFolder },
         @{ Name = $PostinstallIsoNames[1]; Office = $false; Folder = $null })) {
       $PostinstallPath = Join-Path $Config.OutputDirectory $Media.Name
-      $PostinstallArguments = @{ OutPath = $PostinstallPath; VirtIOIsoPath = $VirtIOIso }
+      $PostinstallArguments = @{ Source = $PostinstallSource; OutPath = $PostinstallPath; VirtIOIsoPath = $VirtIOIso }
       if ($Media.Office -and $OfficeKit) { $PostinstallArguments.OfficePath = $OfficeKit.Root }
       if ($Media.Folder) { $PostinstallArguments.FolderPath = $Media.Folder }
       $BuiltBefore = Get-ConfigValue (Read-JsonFile "$PostinstallPath.json") 'built'

@@ -27,7 +27,10 @@ $Office = Join-Path (Get-CiValue (Get-CiValue $Runner 'Office') 'CacheDirectory'
 $Source = Join-Path $Ci.WorkDirectory 'ci-postinstall-source'
 if (Test-Path $Source) { Remove-Item -LiteralPath $Source -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $Source | Out-Null
-Copy-Item (Join-Path $Repo '.postinstall\*') $Source -Recurse -Force
+# the same scripts the runner puts on the real media (runner-config PostinstallSource)
+$PostinstallSource = Get-CiValue $Runner 'PostinstallSource' ''
+if (-not $PostinstallSource) { $PostinstallSource = Join-Path $Repo '.postinstall' }
+Copy-Item (Join-Path $PostinstallSource '*') $Source -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot 'postinstall\*') $Source -Recurse -Force
 
 $OutPath = Join-Path $Ci.WorkDirectory 'ci-postinstall.iso'
