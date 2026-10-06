@@ -8,13 +8,17 @@ Installs one customized ISO (one edition) in a throwaway Proxmox VM and checks t
 1. Uploads the ISO and the CI post-install media to the node's ISO storage (skipped when
    the copy there already has the same SHA-256).
 2. Creates a VM like the hardware the images are made for: q35, OVMF with Secure Boot keys,
-   TPM 2.0, virtio-scsi disk, virtio-net. The ISO's own autounattend.xml drives Setup; for
-   multi-edition media (which ask for the edition) a copy of it with /IMAGE/INDEX set is
-   attached as a small DVD in the first IDE slot, which Setup reads before the ISO's.
-3. Waits for Setup, specialize and the first-logon scripts (the CI media replaces the
-   "Press Enter" pauses with completion markers), taking console screenshots as it goes.
-4. Runs ci\Test-InstalledWindows.ps1 in the guest against what the ISO's manifest and
-   profile say, collects the first-logon transcript, and writes the results.
+   TPM 2.0, virtio-scsi disk, virtio-net, a serial port into a file on the node. The ISO's
+   own autounattend.xml drives Setup. A small per-test DVD in the first IDE slot carries the
+   expected values and ci\Test-InstalledWindows.ps1, and for multi-edition media (which ask
+   for the edition) a copy of the ISO's answer file with /IMAGE/INDEX set, which Setup reads
+   before the ISO's.
+3. Follows Setup on the console (screenshots; nothing new on screen for StallMinutes fails
+   the test) and the first-logon scripts through the serial port, where the CI media streams
+   their transcript.
+4. At the end of first logon the CI media runs the checks against what the ISO's manifest
+   and profile say and sends the results over the serial port too, so neither the guest
+   agent nor the network is needed (the agent is one of the things checked).
 5. Destroys the VM (kept, stopped, on failure with KeepFailedVm).
 
 Results go to <ResultsDirectory>\<iso>-<edition>-<timestamp>\: result.json, checks,
@@ -67,8 +71,11 @@ $Result = [ordered]@{
   phases = [ordered]@{}; summary = $null; checks = @(); facts = $null; notes = @(); vmKept = $false; directory = $OutDir
 }
 $Phase = 'prepare'
-$AnswerIso = $null
+$TestIso = $null
 $SerialLog = $null
+
+# the serial log so far: the firmware's messages, then the first-logon transcript
+function Get-SerialText { Invoke-Pve "tr -d '\000\r' < $SerialLog 2>/dev/null; true" }
 
 function Write-Step([string] $Text) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $($Short): $Text" }
 # a console screenshot; tracks when the screen last showed something new (identical frames
@@ -148,11 +155,16 @@ try {
   if (-not $CiMediaSha) { $CiMediaSha = (Get-FileHash -Algorithm SHA256 $CiMediaPath).Hash.ToLowerInvariant() }
   Publish-Iso $CiMediaPath 'ci-postinstall.iso' $CiMediaSha
 
-  # multi-edition media: the ISO's answer file plus the edition, on a small DVD in front of it.
-  # Setup reads the first autounattend.xml in drive-letter order, and the first IDE slot gets
-  # the first letter. (Not a USB stick: with a USB disk attached, OVMF reads the DVD so slowly
-  # that Setup takes forever to boot.)
-  $AnswerIso = $null
+  # the test's own small DVD, in the first IDE slot: ci\expected.json and the checks, which the
+  # CI media runs at the end of first logon; and for multi-edition media the ISO's answer file
+  # plus the edition - Setup reads the first autounattend.xml in drive-letter order, and the
+  # first IDE slot gets the first letter. (Not a USB stick: with a USB disk attached, OVMF
+  # reads the DVD so slowly that Setup takes forever to boot.)
+  $TestIso = "ci-test-$VmId.iso"
+  $Folder = "$($Ci.WorkDirectoryOnNode)/test-$VmId"
+  Invoke-Pve "rm -rf $Folder; mkdir -p $Folder/ci" | Out-Null
+  Invoke-Pve "$StripBom > $Folder/ci/expected.json" -InputText ($Expected | ConvertTo-Json -Depth 8) | Out-Null
+  Invoke-Pve "$StripBom > $Folder/ci/Test-InstalledWindows.ps1" -InputText (Get-Content -Raw (Join-Path $PSScriptRoot 'Test-InstalledWindows.ps1')) | Out-Null
   if ($Images.Count -gt 1) {
     $Disk = Mount-DiskImage -ImagePath $Iso.FullName -StorageType ISO -Access ReadOnly -PassThru
     try {
@@ -179,13 +191,11 @@ try {
     $Answer.Save($Writer)
     $Answer.Save((Join-Path $OutDir 'autounattend-ci.xml'))
 
-    $AnswerIso = "ci-answer-$VmId.iso"
-    $Folder = "$($Ci.WorkDirectoryOnNode)/answer-$VmId"
-    # -J: Joliet, for the long lowercase name
-    Invoke-Pve ("set -e; rm -rf $Folder; mkdir -p $Folder; $StripBom > $Folder/autounattend.xml; " +
-      "genisoimage -quiet -J -l -V CIANSWER -o $($Ci.IsoDirectory)/$AnswerIso $Folder; rm -rf $Folder") -InputText $Writer.ToString() | Out-Null
-    Write-Step "answer file for edition $($Image.Index) ($($Image.Name)) on $AnswerIso."
+    Invoke-Pve "$StripBom > $Folder/autounattend.xml" -InputText $Writer.ToString() | Out-Null
+    Write-Step "answer file for edition $($Image.Index) ($($Image.Name)) on $TestIso."
   }
+  # -J: Joliet, for long lowercase names
+  Invoke-Pve "set -e; genisoimage -quiet -J -l -V CITEST -o $($Ci.IsoDirectory)/$TestIso $Folder; rm -rf $Folder" | Out-Null
   #endregion
 
   #region VM
@@ -201,7 +211,7 @@ try {
     "--ide2 $($Ci.IsoStorage):iso/$RemoteIso,media=cdrom --ide1 $($Ci.IsoStorage):iso/ci-postinstall.iso,media=cdrom",
     "--boot 'order=scsi0;ide2' --agent enabled=1 --vga std --tags ci --description 'Customize-WindowsIso install test: $($Iso.Name) $($Image.Name)'"
   ) -join ' '
-  if ($AnswerIso) { $Create += " --ide0 $($Ci.IsoStorage):iso/$AnswerIso,media=cdrom" }
+  $Create += " --ide0 $($Ci.IsoStorage):iso/$TestIso,media=cdrom"
   # COM1 into a file on the node: the CI media streams the first-logon transcript to it
   $SerialLog = "$($Ci.WorkDirectoryOnNode)/serial-$VmId.log"
   Invoke-Pve "mkdir -p $($Ci.WorkDirectoryOnNode); rm -f $SerialLog" | Out-Null
@@ -213,24 +223,14 @@ try {
   Write-Step "VM $VmId started: $($Image.Name) from $RemoteIso."
   #endregion
 
-  #region wait: Setup (until the guest agent answers, which the first-logon scripts install), then the first-logon scripts
+  #region wait: Setup (until the first-logon scripts start), then the first-logon scripts, both
+  # followed through the serial copy of their transcript (no guest agent or network needed)
   $Phase = 'setup'
   $Deadline = $Booted.AddMinutes($Ci.SetupTimeoutMinutes)
   $NextShot = Get-Date
-  $NextSerial = Get-Date
-  $ScriptsDone = $null
-  while (-not (Test-GuestAgent $VmId)) {
+  while (-not ((Get-SerialText) -match 'Executing script:|Successfully executed:')) {
     if ((Get-VmStatus $VmId) -ne 'running') { throw "the VM stopped during Setup" }
-    # the first-logon scripts may finish without ever installing the agent
-    if ((Get-Date) -ge $NextSerial) {
-      $NextSerial = (Get-Date).AddMinutes(1)
-      if (-not $ScriptsDone -and (Invoke-Pve "grep -a -c 'CI: first-logon scripts complete' $SerialLog; true").Trim() -ne '0') { $ScriptsDone = Get-Date }
-      if ($ScriptsDone -and ((Get-Date) - $ScriptsDone).TotalMinutes -ge 3) {
-        Save-Shot 'no-agent'
-        throw 'the first-logon scripts finished but the guest agent never answered: the VirtIO guest tools did not install (see serial-oobe-transcript.log)'
-      }
-    }
-    if ((Get-Date) -gt $Deadline) { Save-Shot 'setup-timeout'; throw "the guest agent didn't answer within $($Ci.SetupTimeoutMinutes) minutes (Setup stuck, or the guest tools didn't install)" }
+    if ((Get-Date) -gt $Deadline) { Save-Shot 'setup-timeout'; throw "Setup didn't reach the first-logon scripts within $($Ci.SetupTimeoutMinutes) minutes" }
     if ((Get-Date) -ge $NextShot) { Save-Shot 'setup'; $NextShot = (Get-Date).AddMinutes($Ci.ScreenshotMinutes) }
     # Setup keeps showing new things (progress, phases); a screen with nothing new is stuck
     $Still = ((Get-Date) - $script:ScreenChanged).TotalMinutes
@@ -238,29 +238,38 @@ try {
       Save-Shot 'stalled'
       throw "Setup has shown nothing new for $([int]$Still) minutes: stuck at a prompt, an error or a boot hang (see the last screenshot)"
     }
-    Start-Sleep -Seconds 20
+    Start-Sleep -Seconds 30
   }
   $Result.phases.setupMinutes = [math]::Round(((Get-Date) - $Booted).TotalMinutes, 1)
-  Write-Step "guest agent up after $($Result.phases.setupMinutes) min."
+  Write-Step "first logon after $($Result.phases.setupMinutes) min."
 
   $Phase = 'first logon'
-  $Marker = 'C:\ProgramData\Customize-WindowsIso\ci\oobe-complete.json'
-  $AgentUp = Get-Date
-  $Deadline = $AgentUp.AddMinutes($Ci.PostinstallTimeoutMinutes)
-  while (-not (Read-GuestFile $VmId $Marker)) {
+  $LogonStarted = Get-Date
+  $Deadline = $LogonStarted.AddMinutes($Ci.PostinstallTimeoutMinutes)
+  while (-not (($Serial = Get-SerialText) -match 'CI: first-logon scripts complete')) {
     if ((Get-VmStatus $VmId) -ne 'running') { throw "the VM stopped during the first-logon scripts" }
     if ((Get-Date) -gt $Deadline) { Save-Shot 'firstlogon-timeout'; throw "the first-logon scripts didn't finish within $($Ci.PostinstallTimeoutMinutes) minutes" }
     if ((Get-Date) -ge $NextShot) { Save-Shot 'firstlogon'; $NextShot = (Get-Date).AddMinutes($Ci.ScreenshotMinutes) }
-    Start-Sleep -Seconds 20
+    Start-Sleep -Seconds 30
   }
-  $Result.phases.firstLogonMinutes = [math]::Round(((Get-Date) - $AgentUp).TotalMinutes, 1)
+  $Result.phases.firstLogonMinutes = [math]::Round(((Get-Date) - $LogonStarted).TotalMinutes, 1)
   Write-Step "first-logon scripts done after another $($Result.phases.firstLogonMinutes) min."
   Save-Shot 'done'
   #endregion
 
-  #region checks
+  #region checks: run by the CI media, results in the serial log; through the agent for media that don't
   $Phase = 'checks'
-  $Checked = Invoke-GuestChecks $VmId $Expected (Join-Path $OutDir 'checks-raw.txt')
+  $Lines = @($Serial -split '\n' | ForEach-Object { $_.Trim() })
+  $Begin = [Array]::IndexOf($Lines, 'CI-RESULTS-BEGIN')
+  $End = [Array]::IndexOf($Lines, 'CI-RESULTS-END')
+  if ($Begin -ge 0 -and $End -gt $Begin) {
+    $Encoded = -join @($Lines[($Begin + 1)..($End - 1)] | Where-Object { $_ -like 'CI-RESULTS:*' } | ForEach-Object { $_.Substring(11) })
+    $Json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Encoded))
+    Set-Content -Encoding utf8 (Join-Path $OutDir 'checks-raw.txt') $Json
+    $Checked = $Json.Substring($Json.IndexOf('{')) | ConvertFrom-Json
+  }
+  elseif (Test-GuestAgent $VmId) { $Checked = Invoke-GuestChecks $VmId $Expected (Join-Path $OutDir 'checks-raw.txt') }
+  else { throw 'no check results in the serial log, and no guest agent to run them with' }
   $Result.checks = @($Checked.checks)
   $Result.facts = $Checked.facts
   $Failed = @($Result.checks | Where-Object result -eq 'Fail')
@@ -304,7 +313,7 @@ finally {
     $Result.vmKept = $true
     Write-Step "kept VM $VmId (stopped) for troubleshooting; the next test replaces it."
   }
-  if ($AnswerIso -and -not $Result.vmKept) { Invoke-Pve "rm -f $($Ci.IsoDirectory)/$AnswerIso" -AllowFailure | Out-Null }
+  if ($TestIso -and -not $Result.vmKept) { Invoke-Pve "rm -f $($Ci.IsoDirectory)/$TestIso" -AllowFailure | Out-Null }
   if ($SerialLog -and -not $Result.vmKept) { Invoke-Pve "rm -f $SerialLog" -AllowFailure | Out-Null }
 
   [PSCustomObject] $Result | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')

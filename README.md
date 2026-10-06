@@ -288,11 +288,16 @@ ISO with `-VirtIOIsoPath`/`-VirtIODrivers`.
 
 ### VirtIO (QEMU/KVM, Proxmox)
 
-Besides the drivers in the images, both post-install ISOs get `virtio\virtio-win-guest-tools.exe`
-from the (first) `virtio-iso` set and its SHA-256, and
-`.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs it silently (balloon, serial,
-QEMU guest agent, SPICE agent, the remaining drivers) when the machine has VirtIO devices.
-On anything else it does nothing.
+Besides the drivers in the images, both post-install ISOs get the guest tools from the (first)
+`virtio-iso` set, each with its SHA-256: `virtio\virtio-win-gt-x64.msi` (the remaining drivers
+and services: balloon, serial, ...), `virtio\qemu-ga-x86_64.msi` (the QEMU guest agent) and
+the all-in-one `virtio\virtio-win-guest-tools.exe`. When the machine has VirtIO devices,
+`.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs the drivers MSI and then the
+agent MSI, silently; on anything else it does nothing. They are installed separately because
+the all-in-one installer rolls everything back, drivers and network included, when the agent
+fails (as on Insider 29xxx, which has no VSS service for the agent's VSS provider). Media
+without the MSIs get the all-in-one installer. On failure the script prints the MSI log lines
+that say why.
 
 The installers in upstream (Fedora) virtio-win builds are unsigned; only the drivers are
 (WHQL), and Windows checks those at install time. So the installer is accepted when building
@@ -441,20 +446,23 @@ in a throwaway VM on a dedicated Proxmox VE node, one at a time, and checks the 
    The CI overlay only replaces the two "Press Enter" pauses with completion markers and keeps
    a transcript of the first-logon scripts; everything else is the real post-install media.
 2. **VM** (`ci\Test-IsoOnPve.ps1`): q35, OVMF with Secure Boot keys, TPM 2.0, virtio-scsi
-   disk, virtio-net, both ISOs attached. The ISO's own `autounattend.xml` drives Setup.
-   Multi-edition media would stop at the edition page, so for those a copy of the ISO's answer
-   file with `/IMAGE/INDEX` added goes on a small DVD in the first IDE slot: Setup reads the
-   first `autounattend.xml` in drive-letter order. (A virtual USB stick would also work, but
-   with a USB disk attached OVMF reads the DVD so slowly that Setup takes ages to boot.)
-   Which editions of multi-edition ISOs are tested: `MultiEditionTest` (default: Datacenter
-   with Desktop Experience).
-3. **Waits** for Setup (until the QEMU guest agent, installed by the first-logon scripts,
-   answers) and then for the first-logon scripts, taking a console screenshot every few minutes.
-   Setup's screens always move (progress, spinners), so a screen that hasn't changed for
-   `StallMinutes` (20) fails the test right away: Setup is waiting at a prompt or an error,
-   e.g. the empty disk list of an ISO without the storage driver.
-4. **Checks** in the guest (`ci\Test-InstalledWindows.ps1`, run as SYSTEM through the agent)
-   against the ISO's manifest and its profile in `config.json`: specialize and first-logon
+   disk, virtio-net, a serial port writing to a file on the node, and three DVDs: the ISO, the
+   CI media, and a small per-test DVD with the expected values and the check script. The ISO's
+   own `autounattend.xml` drives Setup. Multi-edition media would stop at the edition page, so
+   for those the per-test DVD also gets a copy of the ISO's answer file with `/IMAGE/INDEX`
+   added; it sits in the first IDE slot, and Setup reads the first `autounattend.xml` in
+   drive-letter order. (A virtual USB stick would also work, but with a USB disk attached OVMF
+   reads the DVD so slowly that Setup takes ages to boot.) Which editions of multi-edition ISOs
+   are tested: `MultiEditionTest` (default: Datacenter with Desktop Experience).
+3. **Follows** Setup on the console, taking a screenshot every few minutes. Setup keeps
+   showing new things (progress, phases), so nothing new on screen for `StallMinutes` (20)
+   fails the test right away: Setup is waiting at a prompt or an error (e.g. the empty disk
+   list of an ISO without the storage driver) or the boot hangs. The first-logon scripts are
+   followed through the serial port: the CI media streams their transcript there.
+4. **Checks**: at the end of first logon the CI media runs `ci\Test-InstalledWindows.ps1`
+   from the per-test DVD and sends the results over the serial port, so a broken guest agent
+   or network is a failed check, not a test that can't run. They compare the machine with the
+   ISO's manifest and its profile in `config.json`: specialize and first-logon
    scripts finished without errors; edition, installation type and build; the local admin;
    WinRE; boot disk on vioscsi and the image's drivers; network and internet; VirtIO guest
    tools; AppX packages and capabilities removed; every registry group in HKLM and the Default
@@ -464,7 +472,9 @@ in a throwaway VM on a dedicated Proxmox VE node, one at a time, and checks the 
    channel) on images that should have it and not on the others; Defender platform and engine;
    critical events since install.
 5. **Reports**: `ResultsDirectory\<iso>-<timestamp>\` gets `result.json`, the expected values,
-   screenshots, the first-logon transcript and, on failure, Setup's logs. The VM is destroyed,
+   screenshots, the first-logon transcript (`serial-oobe-transcript.log`, which also lists
+   devices without drivers and the network state) and, on failure, Setup's logs (through the
+   guest agent, when it runs). The VM is destroyed,
    or on failure kept (stopped) for troubleshooting until the next test (`KeepFailedVm`).
 
 An ISO that passed is not tested again until it changes (by SHA-256); failed ones are retried

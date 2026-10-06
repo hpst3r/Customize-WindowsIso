@@ -74,7 +74,11 @@ Invoke-Check 'post-install: specialize scripts' {
 Invoke-Check 'post-install: first-logon scripts' {
   $Marker = Join-Path $CiDir 'oobe-complete.json'
   $Transcript = Join-Path $CiDir 'oobe-transcript.log'
-  $Lines = if (Test-Path $Transcript) { @(Get-Content $Transcript) } else { @() }
+  # (still open when the CI media runs the checks at the end of first logon)
+  $Lines = @(if (Test-Path $Transcript) {
+      $Stream = [IO.File]::Open($Transcript, 'Open', 'Read', 'ReadWrite')
+      try { (New-Object IO.StreamReader $Stream).ReadToEnd() -split '\r?\n' } finally { $Stream.Dispose() }
+    })
   $Errors = @($Lines | Where-Object { $_ -match '^Error executing script' })
   $Warnings = @($Lines | Where-Object { $_ -match '^WARNING:' })
   if (-not (Test-Path $Marker)) { Add-Check 'post-install: first-logon scripts' 'Fail' 'oobe-complete.json is missing: the first-logon scripts did not run to the end' }

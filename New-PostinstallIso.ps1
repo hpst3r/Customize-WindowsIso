@@ -118,6 +118,11 @@ try {
     $VirtIODir = Join-Path $Tree 'virtio'
     if (Test-Path $VirtIODir) { Remove-Item $VirtIODir -Recurse -Force }
     if ($VirtIOIsoPath) {
+      # a mount is machine-wide: wait until no build (Customize-Iso.ps1's driver sets) is using
+      # the virtio-win ISO, so neither detaches it from under the other
+      $VirtIOMutex = New-Object System.Threading.Mutex($false, 'Global\Customize-WindowsIso-VirtIOIso')
+      try { if (-not $VirtIOMutex.WaitOne([TimeSpan]::FromHours(3))) { throw 'New-PostinstallIso: the virtio-win ISO stayed in use by another process for 3 hours.' } }
+      catch [System.Threading.AbandonedMutexException] { }
       $DiskImage = Get-DiskImage -ImagePath $VirtIOIsoPath
       $MountedHere = -not $DiskImage.Attached
       if ($MountedHere) { $DiskImage = Mount-DiskImage -ImagePath $VirtIOIsoPath -StorageType ISO -Access ReadOnly -PassThru }
@@ -154,6 +159,8 @@ try {
       }
       finally {
         if ($MountedHere) { Dismount-DiskImage -ImagePath $VirtIOIsoPath | Out-Null }
+        try { $VirtIOMutex.ReleaseMutex() } catch { }
+        $VirtIOMutex.Dispose()
       }
     }
 
