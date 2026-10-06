@@ -32,3 +32,5 @@ else { Write-Host 'CI: no ci\expected.json on any drive; the test runs the check
 # the test watches for this line
 Write-Host 'CI: first-logon scripts complete.'
 try { Stop-Transcript | Out-Null } catch { }
+# tells 00-ci-begin.ps1's streamer that the transcript is complete
+Set-Content -Path (Join-Path $CiDir 'transcript-closed') -Value (Get-Date).ToString('o')

@@ -10,7 +10,7 @@ Start-Transcript -Path (Join-Path $CiDir 'oobe-transcript.log') -Append | Out-Nu
 $Streamer = @'
 $Dir = Join-Path $env:ProgramData 'Customize-WindowsIso\ci'
 $Log = Join-Path $Dir 'oobe-transcript.log'
-$Done = Join-Path $Dir 'oobe-complete.json'
+$Done = Join-Path $Dir 'transcript-closed'
 $Port = New-Object System.IO.Ports.SerialPort 'COM1', 115200
 try { $Port.Open() } catch { exit }
 $Position = 0
@@ -29,8 +29,8 @@ while ($true) {
     }
     finally { $Stream.Dispose() }
   }
-  # a few more seconds after the end, for the transcript's last lines
-  if (Test-Path $Done) { if (-not $Until) { $Until = (Get-Date).AddSeconds(10) } elseif ((Get-Date) -gt $Until) { break } }
+  # one more pass after z-wait-for-interaction.ps1 closed the transcript
+  if (Test-Path $Done) { if (-not $Until) { $Until = (Get-Date).AddSeconds(4) } elseif ((Get-Date) -gt $Until) { break } }
   Start-Sleep -Seconds 2
 }
 $Port.Close()

@@ -271,6 +271,11 @@ try {
   elseif (Test-GuestAgent $VmId) { $Checked = Invoke-GuestChecks $VmId $Expected (Join-Path $OutDir 'checks-raw.txt') }
   else { throw 'no check results in the serial log, and no guest agent to run them with' }
   $Result.checks = @($Checked.checks)
+  # known issues (ci-config KnownIssues: Iso and Check wildcards, Reason) are warnings, not failures
+  foreach ($Check in @($Result.checks | Where-Object result -eq 'Fail')) {
+    $Known = @(Get-CiValue $Ci 'KnownIssues' @()) | Where-Object { $Iso.Name -like $_.Iso -and $Check.name -like $_.Check } | Select-Object -First 1
+    if ($Known) { $Check.result = 'Warn'; $Check.detail = "known issue ($($Known.Reason)): $($Check.detail)" }
+  }
   $Result.facts = $Checked.facts
   $Failed = @($Result.checks | Where-Object result -eq 'Fail')
   $Result.result = if ($Failed) { 'Fail' } else { 'Pass' }

@@ -30,6 +30,14 @@
   "Exclude": ["*.previous.iso", "postinstall*.iso", "*-virtio-test.iso"],
   "MultiEditionTest": ["*Datacenter (Desktop Experience)"],
   "AdminUser": "admin",
+  "KnownIssues": [
+    {
+      "Iso": "*InsiderPreview29xxx*",
+      "Check": "virtio: guest tools",
+      "Reason": "virtio-win 0.1.302's guest agent can't register its VSS provider on Insider 29xxx (MSI error 1722, VSS_E_UNEXPECTED_PROVIDER_ERROR); drivers and network are fine. Recheck with each virtio-win release.",
+      "Since": "2026-10-05"
+    }
+  ],
   "ExpectSoftware": {
     "Client": ["Google Chrome", "Microsoft Visual Studio Code"],
     "Server": ["Google Chrome", "Microsoft Visual Studio Code"],

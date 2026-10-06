@@ -109,7 +109,8 @@ Invoke-Check 'post-install: first-logon scripts' {
 Invoke-Check 'os: edition' {
   $Want = "$($Expected.edition)" -replace '\s*\(Desktop Experience\)$', ''
   $WantType = if ($Expected.edition -like 'Windows Server*') { if ($Expected.edition -like '*(Desktop Experience)') { 'Server' } else { 'Server Core' } } else { 'Client' }
-  if ($Caption -notlike "*$Want") { Add-Check 'os: edition' 'Fail' "installed '$Caption', expected '$($Expected.edition)'" }
+  # (Insider builds say "Windows 11 Pro Insider Preview")
+  if ($Caption -notlike "*$Want*") { Add-Check 'os: edition' 'Fail' "installed '$Caption', expected '$($Expected.edition)'" }
   elseif ($Os.InstallationType -ne $WantType) { Add-Check 'os: edition' 'Fail' "installation type $($Os.InstallationType), expected $WantType" }
   else { Add-Check 'os: edition' 'Pass' "$Caption ($($Os.InstallationType))" }
 }

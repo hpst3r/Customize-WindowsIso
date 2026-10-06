@@ -295,7 +295,8 @@ the all-in-one `virtio\virtio-win-guest-tools.exe`. When the machine has VirtIO 
 `.postinstall\oobe\05-install-virtio-guest-tools.ps1` installs the drivers MSI and then the
 agent MSI, silently; on anything else it does nothing. They are installed separately because
 the all-in-one installer rolls everything back, drivers and network included, when the agent
-fails (as on Insider 29xxx, which has no VSS service for the agent's VSS provider). Media
+fails (as on Insider 29xxx, where the agent's VSS provider fails to register with
+`VSS_E_UNEXPECTED_PROVIDER_ERROR`). Media
 without the MSIs get the all-in-one installer. On failure the script prints the MSI log lines
 that say why.
 
@@ -490,7 +491,9 @@ every run. The run writes `LogDirectory\last-run-ci.json` for the notification (
 
 `ci\ci-config.json` says where and how: the node (`Host`, `Node`), SSH as root with a
 dedicated key (`SshKey`) and a pinned host key (`KnownHostsFile`), the storages and bridge, the
-VM ID and size, timeouts, and the expectations above. Everything goes through `ssh`/`scp` and
+VM ID and size, timeouts, and the expectations above. `KnownIssues` turns a failing check into
+a warning with a reason (`Iso` and `Check` are wildcards), for problems that are understood and
+waiting on someone else, so they don't fail every week; remove the entry when it's fixed. Everything goes through `ssh`/`scp` and
 `qm`/`pvesh` on the node. The key and known_hosts live in `Y:\IsoBuild\Secrets`, readable only
 by SYSTEM and Administrators. One test takes about 20-40 minutes; the node needs room for one
 VM (10 GB RAM, a 64 GB thin disk) and three ISOs.
