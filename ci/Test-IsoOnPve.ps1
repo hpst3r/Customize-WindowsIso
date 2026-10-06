@@ -64,10 +64,11 @@ $Started = Get-Date
 $Result = [ordered]@{
   iso = $Iso.Name; sha256 = $null; edition = $Image.Name; index = $Image.Index; version = $Image.Version
   started = $Started.ToString('o'); finished = $null; result = 'Fail'; error = $null
-  phases = [ordered]@{}; summary = $null; checks = @(); facts = $null; vmKept = $false; directory = $OutDir
+  phases = [ordered]@{}; summary = $null; checks = @(); facts = $null; notes = @(); vmKept = $false; directory = $OutDir
 }
 $Phase = 'prepare'
 $AnswerIso = $null
+$SerialLog = $null
 
 function Write-Step([string] $Text) { Write-Host "$(Get-Date -Format 'HH:mm:ss') $($Short): $Text" }
 # a console screenshot; tracks when the screen last showed something new (identical frames
@@ -201,6 +202,10 @@ try {
     "--boot 'order=scsi0;ide2' --agent enabled=1 --vga std --tags ci --description 'Customize-WindowsIso install test: $($Iso.Name) $($Image.Name)'"
   ) -join ' '
   if ($AnswerIso) { $Create += " --ide0 $($Ci.IsoStorage):iso/$AnswerIso,media=cdrom" }
+  # COM1 into a file on the node: the CI media streams the first-logon transcript to it
+  $SerialLog = "$($Ci.WorkDirectoryOnNode)/serial-$VmId.log"
+  Invoke-Pve "mkdir -p $($Ci.WorkDirectoryOnNode); rm -f $SerialLog" | Out-Null
+  $Create += " --args '-serial file:$SerialLog'"
   Invoke-Pve $Create -TimeoutSeconds 300 | Out-Null
   Invoke-Pve "qm start $VmId" -TimeoutSeconds 120 | Out-Null
   $Booted = Get-Date
@@ -212,8 +217,19 @@ try {
   $Phase = 'setup'
   $Deadline = $Booted.AddMinutes($Ci.SetupTimeoutMinutes)
   $NextShot = Get-Date
+  $NextSerial = Get-Date
+  $ScriptsDone = $null
   while (-not (Test-GuestAgent $VmId)) {
     if ((Get-VmStatus $VmId) -ne 'running') { throw "the VM stopped during Setup" }
+    # the first-logon scripts may finish without ever installing the agent
+    if ((Get-Date) -ge $NextSerial) {
+      $NextSerial = (Get-Date).AddMinutes(1)
+      if (-not $ScriptsDone -and (Invoke-Pve "grep -a -c 'CI: first-logon scripts complete' $SerialLog; true").Trim() -ne '0') { $ScriptsDone = Get-Date }
+      if ($ScriptsDone -and ((Get-Date) - $ScriptsDone).TotalMinutes -ge 3) {
+        Save-Shot 'no-agent'
+        throw 'the first-logon scripts finished but the guest agent never answered: the VirtIO guest tools did not install (see serial-oobe-transcript.log)'
+      }
+    }
     if ((Get-Date) -gt $Deadline) { Save-Shot 'setup-timeout'; throw "the guest agent didn't answer within $($Ci.SetupTimeoutMinutes) minutes (Setup stuck, or the guest tools didn't install)" }
     if ((Get-Date) -ge $NextShot) { Save-Shot 'setup'; $NextShot = (Get-Date).AddMinutes($Ci.ScreenshotMinutes) }
     # Setup keeps showing new things (progress, phases); a screen with nothing new is stuck
@@ -258,7 +274,17 @@ catch {
   if (Get-VmStatus $VmId) { Save-Shot 'failure' }
 }
 finally {
-  # whatever the outcome: the first-logon transcript and, on failure, Setup's logs
+  # whatever the outcome: the first-logon transcript (from COM1, so also without the agent)
+  # and, on failure, Setup's logs
+  if ($SerialLog) {
+    $SerialCopy = Join-Path $OutDir 'serial-oobe-transcript.log'
+    try {
+      Copy-FromPve $SerialLog $SerialCopy
+      # the scripts' warnings, for the report (the checks see them too, but not when the agent never came up)
+      $Result.notes = @(Get-Content $SerialCopy -Encoding UTF8 | ForEach-Object { $_ -replace '[\x00\r]', '' } | Where-Object { $_ -match '^WARNING: ' } | Select-Object -Unique -First 10)
+    }
+    catch { Write-Warning "no serial log: $_" }
+  }
   if ((Get-VmStatus $VmId) -eq 'running' -and (Test-GuestAgent $VmId)) {
     $Files = @('C:\ProgramData\Customize-WindowsIso\ci\oobe-transcript.log')
     if ($Result.result -ne 'Pass') { $Files += 'C:\Windows\Panther\setupact.log', 'C:\Windows\Panther\UnattendGC\setupact.log' }
@@ -279,6 +305,7 @@ finally {
     Write-Step "kept VM $VmId (stopped) for troubleshooting; the next test replaces it."
   }
   if ($AnswerIso -and -not $Result.vmKept) { Invoke-Pve "rm -f $($Ci.IsoDirectory)/$AnswerIso" -AllowFailure | Out-Null }
+  if ($SerialLog -and -not $Result.vmKept) { Invoke-Pve "rm -f $SerialLog" -AllowFailure | Out-Null }
 
   [PSCustomObject] $Result | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8 (Join-Path $OutDir 'result.json')
   Write-Step "$($Result.result): $($Result.summary)$(if ($Result.error) { " - $($Result.error)" }) ($($Result.phases.totalMinutes) min)."

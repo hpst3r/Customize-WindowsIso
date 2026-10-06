@@ -131,7 +131,11 @@ try {
         minutes   = $Minutes
         summary   = $(if ($Result) { $Result.summary })
         failures  = @(if ($Result) { $Result.checks | Where-Object result -eq 'Fail' | ForEach-Object { "$($_.name): $($_.detail)" } })
-        warnings  = @(if ($Result) { $Result.checks | Where-Object result -eq 'Warn' | ForEach-Object { "$($_.name): $($_.detail)" } })
+        warnings  = @(if ($Result) {
+            $Result.checks | Where-Object result -eq 'Warn' | ForEach-Object { "$($_.name): $($_.detail)" }
+            # the first-logon scripts' own warnings, when the checks couldn't run
+            if (-not @($Result.checks).Count) { Get-CiValue $Result 'notes' @() | ForEach-Object { "first logon: $_" } }
+          })
         phases    = $(if ($Result) { $Result.phases })
         directory = $(if ($Result) { $Result.directory })
         vmKept    = $(if ($Result) { $Result.vmKept } else { $false })

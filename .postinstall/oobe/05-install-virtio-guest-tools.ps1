@@ -38,12 +38,25 @@ if (-not $Trusted) {
 }
 
 Write-Host "Installing VirtIO guest tools from $Installer..."
-$Process = Start-Process -FilePath $Installer -ArgumentList '/install', '/quiet', '/norestart' -Wait -PassThru
+# the installer (a WiX bundle) logs itself and each package it installs next to this log
+$Log = Join-Path $env:TEMP 'virtio-win-guest-tools.log'
+$Process = Start-Process -FilePath $Installer -ArgumentList '/install', '/quiet', '/norestart', '/log', "`"$Log`"" -Wait -PassThru
 
 # 3010: installed, reboot required
 if ($Process.ExitCode -in 0, 3010) {
   Write-Host "VirtIO guest tools installed (exit code $($Process.ExitCode))."
 }
 else {
-  Write-Warning "VirtIO guest tools installer failed with exit code $($Process.ExitCode)."
+  Write-Warning "VirtIO guest tools installer failed with exit code $($Process.ExitCode). Logs: $env:TEMP\virtio-win-guest-tools*.log"
+  # the reason is usually in the last error lines of the bundle's log...
+  Get-Content $Log -ErrorAction SilentlyContinue | Where-Object { $_ -match 'error|failed' } | Select-Object -Last 8 | ForEach-Object { Write-Host "  $_" }
+  # ...and, for a failed MSI, just before "Return value 3" in that package's own log
+  foreach ($PackageLog in @(Get-ChildItem $env:TEMP -Filter 'virtio-win-guest-tools_*.log' -ErrorAction SilentlyContinue)) {
+    $Lines = @(Get-Content $PackageLog.FullName -ErrorAction SilentlyContinue)
+    $At = [Array]::FindIndex([string[]] $Lines, [Predicate[string]] { param ($Line) $Line -match 'Return value 3' })
+    if ($At -ge 0) {
+      Write-Host "  $($PackageLog.Name):"
+      $Lines[[Math]::Max(0, $At - 12)..$At] | ForEach-Object { Write-Host "    $_" }
+    }
+  }
 }
