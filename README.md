@@ -477,8 +477,20 @@ every run. The run writes `LogDirectory\last-run-ci.json` for the notification (
 dedicated key (`SshKey`) and a pinned host key (`KnownHostsFile`), the storages and bridge, the
 VM ID and size, timeouts, and the expectations above. Everything goes through `ssh`/`scp` and
 `qm`/`pvesh` on the node. The key and known_hosts live in `Y:\IsoBuild\Secrets`, readable only
-by SYSTEM and Administrators. One test takes about 30-60 minutes; the node needs room for one
+by SYSTEM and Administrators. One test takes about 20-40 minutes; the node needs room for one
 VM (10 GB RAM, a 64 GB thin disk) and three ISOs.
+
+Setting it up on a new node:
+
+```PowerShell
+ssh-keygen -t ed25519 -N '""' -C image-tests -f Y:\IsoBuild\Secrets\pve_ed25519
+# the SYSTEM task's ssh refuses a key owned by (or shared with) an individual user:
+icacls Y:\IsoBuild\Secrets\pve_ed25519 /setowner *S-1-5-32-544
+icacls Y:\IsoBuild\Secrets\pve_ed25519 /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F
+# on the node, in /root/.ssh/authorized_keys: from="<this box's IP>" <contents of pve_ed25519.pub>
+# record the node's host key (check its fingerprint against ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub on the node):
+ssh -i Y:\IsoBuild\Secrets\pve_ed25519 -o UserKnownHostsFile=Y:\IsoBuild\Secrets\known_hosts root@<node> hostname
+```
 
 ## Checking a customized ISO (`Test-CustomizedIso.ps1`)
 

@@ -38,7 +38,7 @@ Images built weekly: Windows 11 Pro 25H2, 26H2, Insider 29xxx (latest), Server 2
 ## Next
 
 ### 1. Test node (Proxmox, separate from prod)
-A dedicated PVE node is coming. Use it for:
+The dedicated node is `llm-pve` (see item 2). Manual cases still to run there:
 - **Disk picker, single virtio-scsi disk:** fully unattended install. Check that `C:\Windows\Panther\unattend.xml` targets disk 0.
 - **Disk picker, two disks:** the menu appears; pick disk 1; disk 0 is untouched; the `S` key opens Setup's own disk page.
 - **Disk picker, USB disk attached:** the USB disk is never offered.
@@ -50,15 +50,10 @@ A dedicated PVE node is coming. Use it for:
 
 Full disk-picker steps are in the README.
 
-### 2. Automated install test (#1)
-After each weekly run, on the test node:
-1. Boot each new ISO with `postinstall-client.iso` or `postinstall-server.iso` in a throwaway VM (virtio-scsi, no TPM).
-2. Wait for the QEMU guest agent.
-3. Check the build, the account, the network, that the removed apps are absent, and (clients) that Office installed.
-4. Destroy the VM.
-5. Report through the notification step.
-
-Needs a Proxmox API token scoped to the test node.
+### 2. Automated install test (#1): built
+`ci\Invoke-ImageTests.ps1` on `llm-pve` (node `800g4m`, PVE 9.2, i5-8500, 16 GB), over SSH; see the README. To do:
+- [ ] Register it in the weekly task: `register-task.ps1 -GetWindowsIsoPath Y:\src\Get-WindowsIso -InstallTests`.
+- [ ] More cases: the disk picker (item 1), the other Server editions, BIOS/SeaBIOS boot.
 
 ### 3. Switch Dell storage to AHCI from WinPE
 Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run AHCI for performance anyway).
@@ -99,4 +94,8 @@ Avoids the "no disk" problem without carrying the Intel RST/VMD driver (we run A
   - `-not @(0)` is true.
   - `[1]` in `-like` is a character class.
 - **Sandboxed shells can't load hives or service a mounted image** (error 87, "filename too long"). Run those tests as SYSTEM via a scheduled task.
+- **Windows OpenSSH as SYSTEM** refuses a private key owned by, or granting access to, an individual user ("bad permissions"). Own it by Administrators; grant only SYSTEM and Administrators.
+- **`qm guest exec --pass-stdin` times out** against the Windows guest agent. Write data into the guest with the agent's file-write (`pvesh create .../agent/file-write`) and exec without stdin.
+- **.NET writes a UTF-8 BOM to a child's stdin** before your data; strip it on the receiving side.
+- **QEMU HMP `screendump`** takes the filename first: `screendump /tmp/x.png -f png`.
 - **fedorapeople.org directory listings are behind a browser challenge,** but direct file links download fine.
